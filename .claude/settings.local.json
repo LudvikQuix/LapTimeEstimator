@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(reg add:*)",
+      "Bash(xxd C:/repos/LapTimeEstimator/tracks/ks_nurburgring/layout_gp_a/ai/fast_lane.ai)",
+      "Bash(xxd:*)",
+      "Bash(ls:*)",
+      "Bash(pip install:*)",
+      "Bash(find /c/repos/LapTimeEstimator/cars -type f -exec ls -lh {} \\\\;)",
+      "Bash(find:*)",
+      "Bash(sort -k2)",
+      "Bash(xargs -I {} sh -c 'echo \"=== {} ===\" && cat {}')",
+      "Bash(pip search:*)",
+      "Bash(pip index:*)",
+      "Bash(curl -s \"https://pypi.org/search/?q=assetto+corsa+acd\")",
+      "Bash(curl -s \"https://pypi.org/simple/\")",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:www.zenhax.com)",
+      "WebFetch(domain:aluigi.altervista.org)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Assetto Corsa input data (keep folders via .gitkeep)
+cars_in/*
+!cars_in/.gitkeep
+tracks_in/*
+!tracks_in/.gitkeep

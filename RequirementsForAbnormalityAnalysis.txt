@@ -1,0 +1,10 @@
+Performance req:
+ReqID1: The driver shall finish the 'Monza' track in under 55.250s.
+ReqID2: The car shall not exceed maximum acceleration limit 3.5G for more than 20 ms in longitudinal direction.
+ReqID3: The car shall not exceed absolute acceleration limit 5G in longitudinal direction
+ReqID4: The car shall not exceed maximum acceleration limit 4G in lateral direction.
+ReqID5: The car shall have zero collisions during the whole race.
+
+Car setup:
+ReqID6: The tyres temperature shall not exceed 80 degC.
+ReqID7: The tyres pressure shall be in range of 200 to 400 kPa

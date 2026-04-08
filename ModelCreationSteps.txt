@@ -1,0 +1,13 @@
+1. The first thing you’ll need is a tyre model. By this I mean something that takes slip velocity and vertical displacement (or load if you don’t mind taking shortcuts) and returns lateral and longitudinal forces. Start simple - you don’t need a Pacejka model straight away!
+
+2. Next step is the vehicle model, by which I mean a system of equations that will turn a state/driver inputs (steer angle, side slip angle, throttle and brake etc) into a set of accelerations (lateral, longitudinal, yaw). You can probably find the equations of motion for the bicycle model in any reputable vehicle dynamics textbook book. You’ll of course be reliant on the tyre model you made in step 1!
+
+3. Next, you’ll need to wrap an optimiser around the model to ‘trim’ it to a set of target conditions. You can use this to find out what combination of states/driver control inputs are required for the vehicle to achieve maximum acceleration along a given vector, subject to constraints like ‘zero yaw acceleration’
+
+4. With this in place, you should be able to generate the performance envelope of the vehicle, using what is know as the G-G-V surface. Starting from low speed, create the envelope by asking the optimiser what the maximum acceleration of the vehicle is at each ratio of longitudinal and lateral acceleration (both acceleration and braking). Then move on to higher speeds.
+
+5. Now it’s time to introduce the circuit model. At its simplest, this is a vector of track curvature (inverse of the radius) you want to follow, against the distance along the racing line that each curvature value represents.
+
+6. In order to ‘drive’ the G-G-V model around the lap, you will need to do three passes. The first is to retrieve the maximum speed you can go around each curvature on the circuit model, ignoring any longitudinal acceleration. The corner radius that each point on the G-G-V plot represents is given by v^2/a, where ‘a’ is lateral acceleration.
+
+7. You now have the maximum speed the car can go around the lap, however there’s no continuity between the points in terms of longitudinal acceleration. You will now have to do sweeps through the lap in both directions to determine how quickly the car can accelerate on entry and exit to reach maximum speed!
