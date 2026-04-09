@@ -22,7 +22,8 @@
       "WebFetch(domain:www.zenhax.com)",
       "WebFetch(domain:aluigi.altervista.org)",
       "Bash(git rm:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }

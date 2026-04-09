@@ -1,0 +1,7 @@
+track_id,corner_id,corner_name,corner_type,corner_color,nd_start,nd_end,min_radius_m,avg_radius_m,min_speed_kmh,avg_speed_kmh
+ks_nurburgring_sprint_a,T1,Turn 1,HAIRPIN,red,0.168169,0.362740,25.8,118.8,38.7,85.4
+ks_nurburgring_sprint_a,T2,Turn 2,HAIRPIN,red,0.430866,0.479434,33.7,65.4,61.8,77.2
+ks_nurburgring_sprint_a,T3,Turn 3,HAIRPIN,red,0.501028,0.614318,58.9,169.8,82.1,105.4
+ks_nurburgring_sprint_a,T4,Turn 4,SWEEPER,#FFD700,0.677057,0.726100,227.5,352.3,177.0,182.3
+ks_nurburgring_sprint_a,T5,Turn 5,HAIRPIN,red,0.823447,0.870053,27.4,117.5,48.4,72.4
+ks_nurburgring_sprint_a,T6,Turn 6,HAIRPIN,red,0.902217,0.952528,42.8,80.8,81.3,91.6
