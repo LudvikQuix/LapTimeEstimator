@@ -1,6 +1,8 @@
 """Cross-track validation: compare a SimResult against a real AC telemetry lap.
 
-Reused by `lap.py --validate-against`.
+Reused by `lap.py --validate-against`. v1.1: validation targets sim lap 2 by
+default (the flying-lap analogue of a real learned lap). `target_lap=1` is the
+fallback for `--single-lap` mode.
 """
 from __future__ import annotations
 
@@ -20,7 +22,8 @@ class ValidationResult:
     delta_s: float
     delta_pct: float
     verdict: str
-    bins: list  # list of dicts (bin_start_m, bin_end_m, kind, t_sim_s, t_real_s, delta_s, v_avg_sim_kmh, v_avg_real_kmh)
+    bins: list
+    target_lap: int = 2
 
 
 def _verdict(delta_s: float, real_lap_s: float) -> str:
@@ -34,23 +37,46 @@ def _verdict(delta_s: float, real_lap_s: float) -> str:
     return "BAD"
 
 
+def _slice_to_target_lap(sim_result, target_lap: int):
+    """Return (distances, times-from-lap-start, speeds_kmh) for the target lap.
+
+    For two-lap results: extracts the rows where `lap_id == target_lap` and
+    re-zeros the time so `times[0] == 0` (lap-relative).
+    For single-lap results: returns the full sim arrays as-is.
+    """
+    if sim_result.lap_id is not None and sim_result.two_lap:
+        mask = sim_result.lap_id == target_lap
+        if not mask.any():
+            # Fall back to the whole result.
+            mask = np.ones(len(sim_result.distances), dtype=bool)
+        d = sim_result.distances[mask]
+        t = sim_result.times[mask]
+        v = sim_result.speeds[mask] * 3.6
+        # Re-zero time to lap start.
+        t = t - t[0]
+        return d, t, v
+    return (
+        sim_result.distances,
+        sim_result.times - sim_result.times[0],
+        sim_result.speeds * 3.6,
+    )
+
+
 def validate_lap(car, track, sim_result, real_telem_path, *, bin_m: int = 100,
-                 per_corner: bool = False) -> ValidationResult:
+                 per_corner: bool = False, target_lap: int = 2) -> ValidationResult:
     """Compare `sim_result` against a real AC telemetry CSV.
 
     `track` must be CSV-backed. Returns a ValidationResult; callers handle I/O.
+    `target_lap` selects which sim lap to compare against (default 2 = flying).
     """
     telem = read_ac_log(real_telem_path)
     real_lap = lap_time_seconds(telem)
     merged = merge_with_track(telem, track)
 
-    sim_d = sim_result.distances
-    sim_t = sim_result.times
-    sim_v_kmh = sim_result.speeds * 3.6
+    sim_d, sim_t, sim_v_kmh = _slice_to_target_lap(sim_result, target_lap)
 
     real_d = merged["distance_m"]
     real_v_kmh = merged["speedKmh"]
-    # Real timeline: re-zero to lap start
     real_t = (merged["timestamp_ms"] - merged["timestamp_ms"][0]) / 1000.0
 
     sim_lap = float(sim_t[-1])
@@ -58,7 +84,6 @@ def validate_lap(car, track, sim_result, real_telem_path, *, bin_m: int = 100,
     delta_pct = (delta_s / real_lap * 100.0) if real_lap > 0 else 0.0
     verdict = _verdict(delta_s, real_lap)
 
-    # Build bins
     total = float(sim_d[-1])
     if per_corner:
         spans = _corner_spans(track, total)
@@ -91,6 +116,7 @@ def validate_lap(car, track, sim_result, real_telem_path, *, bin_m: int = 100,
         delta_pct=delta_pct,
         verdict=verdict,
         bins=bins,
+        target_lap=target_lap,
     )
 
 
@@ -112,12 +138,7 @@ def _segment_avg(d, vals, a, b):
 
 
 def _corner_spans(track, total_m):
-    """Generate (start, end, kind) spans over a CSV-backed track.
-
-    Each contiguous run with radius < 500 m becomes a corner span; the rest
-    becomes a straight span. Falls back to a single 'lap' span if track lacks
-    the data.
-    """
+    """Generate (start, end, kind) spans over a CSV-backed track."""
     if not getattr(track, "is_csv_backed", False):
         return [(0.0, total_m, "lap")]
     d = track.csv_data["distance_m"]

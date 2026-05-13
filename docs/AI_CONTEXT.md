@@ -167,3 +167,12 @@ Two CSV variants exist per layout:
 - **Compare cars**: run same track with different car dirs
 - **Tune accuracy**: adjust `--ds` (smaller = more accurate), improve tyre model, add elevation effects
 - **Extend physics**: add traction control, ABS, weight transfer, tyre thermal model
+
+## Future directions
+
+Longer-horizon research backlog is captured in the lap-simulation spec, §19. Two items, neither scheduled:
+
+- **Slip-based simulator (v3)** — Pacejka Magic Formula tyre model, friction ellipse, time-domain ODE integration over `(x, y, ψ, v_x, v_y, ω_yaw, ω_wheel×4)`, driver-as-control-loop (preview + PID + α_target). Replaces the point-mass for drift / oversteer / understeer fidelity; lives alongside it. Multi-week build. AC shared-memory channels (`localVelocity_*`, `localAngularVel_*`, `wheelSlipFL/FR/RL/RR`, `wheelLoadFL/...`, `wheelAngularSpeedFL/...`, `tyreContactHeading*`) give us ground-truth `(α, κ, Fz)` per wheel for fitting Pacejka coefficients against AC.
+- **Tyre-state model (v2)** — per-wheel `(T_core, wear_km, P)` integrated over the lap; grip = product of thermal LUT × wear LUT × pressure curve. All three curves already exist in AC's `tyres.ini` (`PERFORMANCE_CURVE`, `WEAR_CURVE`, `PRESSURE_IDEAL` / `PRESSURE_D_GAIN`) and are currently ignored by `car.py`. Fits inside the existing point-mass sim — one week of evening work, can ship independently of v3.
+
+See `dev-planning/lap-simulation-csv-driver/spec.md` §19 for AC signal coverage, conversion strategy from `tyres.ini` to Pacejka, effort estimates, and the v1 → v2 → v3 sequencing recommendation.

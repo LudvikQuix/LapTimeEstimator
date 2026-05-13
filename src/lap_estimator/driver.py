@@ -1,18 +1,27 @@
-"""Driver model: skill multiplier + consistency noise.
+"""Driver model: skill multiplier + consistency noise + v1.1 input-shape fields.
 
-v1 keeps it intentionally minimal — `skill_pct` uniformly scales the car's
-effective grip (lateral + longitudinal), `consistency_sigma` (seconds-flavour)
-maps to a small per-point grip sigma for Monte-Carlo runs.
+v1 fields (`skill_pct`, `consistency_sigma`) drive grip scaling and Monte-Carlo
+noise. v1.1 adds three sim-telemetry-only shape fields consumed by
+`sim_telemetry.py` (not the grip-scaling path):
+  - `driver_tau_s`    -- 1st-order low-pass time constant on gas/brake.
+  - `trail_brake_m`   -- linear brake-taper distance on corner entry.
+  - `throttle_ramp_m` -- linear throttle-ramp distance on corner exit.
+
+Format: JSON only. No YAML fallback (v1.1 clean break -- see spec §6.2).
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 
-import yaml
-
 # Heuristic: seconds-of-jitter -> per-point grip sigma (fraction). v1 calibration.
 SIGMA_SECONDS_TO_GRIP = 0.03
+
+# v1.1 defaults (spec §6.2 / §7.2).
+DEFAULT_DRIVER_TAU_S = 0.12
+DEFAULT_TRAIL_BRAKE_M = 30.0
+DEFAULT_THROTTLE_RAMP_M = 40.0
 
 
 @dataclass
@@ -20,24 +29,44 @@ class Driver:
     name: str
     skill_pct: float
     consistency_sigma: float = 0.0
+    driver_tau_s: float = DEFAULT_DRIVER_TAU_S
+    trail_brake_m: float = DEFAULT_TRAIL_BRAKE_M
+    throttle_ramp_m: float = DEFAULT_THROTTLE_RAMP_M
     source: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str) -> "Driver":
         with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError(f"Driver JSON {path}: top-level must be an object")
         if "skill_pct" not in raw:
-            raise ValueError(f"Driver YAML {path} missing required field 'skill_pct'")
+            raise ValueError(f"Driver JSON {path} missing required field 'skill_pct'")
         skill = float(raw["skill_pct"])
         if not (0.0 < skill <= 1.0):
             raise ValueError(
-                f"Driver YAML {path}: skill_pct must be in (0, 1], got {skill}"
+                f"Driver JSON {path}: skill_pct must be in (0, 1], got {skill}"
             )
         sigma = float(raw.get("consistency_sigma", 0.0))
         if sigma < 0:
             raise ValueError(
-                f"Driver YAML {path}: consistency_sigma must be >= 0, got {sigma}"
+                f"Driver JSON {path}: consistency_sigma must be >= 0, got {sigma}"
+            )
+        tau = float(raw.get("driver_tau_s", DEFAULT_DRIVER_TAU_S))
+        if tau < 0:
+            raise ValueError(
+                f"Driver JSON {path}: driver_tau_s must be >= 0, got {tau}"
+            )
+        trail = float(raw.get("trail_brake_m", DEFAULT_TRAIL_BRAKE_M))
+        if trail < 0:
+            raise ValueError(
+                f"Driver JSON {path}: trail_brake_m must be >= 0, got {trail}"
+            )
+        ramp = float(raw.get("throttle_ramp_m", DEFAULT_THROTTLE_RAMP_M))
+        if ramp < 0:
+            raise ValueError(
+                f"Driver JSON {path}: throttle_ramp_m must be >= 0, got {ramp}"
             )
         name = raw.get("name") or os.path.splitext(os.path.basename(path))[0]
         source = raw.get("source") or {}
@@ -45,6 +74,9 @@ class Driver:
             name=str(name),
             skill_pct=skill,
             consistency_sigma=sigma,
+            driver_tau_s=tau,
+            trail_brake_m=trail,
+            throttle_ramp_m=ramp,
             source=source if isinstance(source, dict) else {},
             raw=raw,
         )
@@ -141,4 +173,7 @@ class _DriverScaledCar:
         return (traction - drag - rr) / self._car.total_mass
 
     def __repr__(self):
-        return f"<DriverScaledCar driver={self._driver.name} skill={self._driver.skill_pct} car={self._car!r}>"
+        return (
+            f"<DriverScaledCar driver={self._driver.name} "
+            f"skill={self._driver.skill_pct} car={self._car!r}>"
+        )

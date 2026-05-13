@@ -1,0 +1,8 @@
+{
+  "name": "Pro",
+  "skill_pct": 0.97,
+  "consistency_sigma": 0.1,
+  "driver_tau_s": 0.12,
+  "trail_brake_m": 30.0,
+  "throttle_ramp_m": 40.0
+}

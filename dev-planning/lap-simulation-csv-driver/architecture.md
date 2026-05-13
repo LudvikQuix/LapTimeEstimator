@@ -116,3 +116,167 @@ samples/aclog/          one committed AC log for reproducible acceptance
 - No `pyproject.toml` / editable install — `_bootstrap.py` shim is used instead (per spec §6.8).
 - Did not delete or modify the user's `Corner_Analysis/` scratch folder (per spec §13.8).
 - Did not write tests — that is Tester's job, and the user said to skip Tester by default.
+
+---
+
+## v1.1 addendum (driver JSON migration, layered telemetry, two-lap default)
+
+### Summary of v1.1 changes
+
+Four bundled changes layered on the shipped v1 plumbing (spec §13/§14.3/§20):
+
+- **A. YAML → JSON driver config.** Loader now uses stdlib `json` only. PyYAML dropped. Every existing `drivers/*.yaml` rewritten as `.json` and deleted. No fallback.
+- **B. Driver-lag 1st-order low-pass** on emitted gas/brake (`driver_tau_s`, default 0.12 s).
+- **C. Trail-brake + throttle-ramp corner-shape heuristic** (`trail_brake_m`/30 m, `throttle_ramp_m`/40 m defaults). Applied BEFORE the low-pass.
+- **D. Two-lap "tiled" simulation, default on.** Single 3-pass over a tiled segment list; output split into lap 1 (standing) / lap 2 (flying). `--single-lap` opts out.
+
+### Layered telemetry pipeline (sim_telemetry.py, §14.3)
+
+```
+sim limit-label sequence (per-point: corner|accel|brake)
+   |
+   v
+[Layer 1] limit-label rule  ----------------------------------+
+   accel  -> gas=1, brake=0                                    |
+   brake  -> gas=0, brake=1                                    |
+   corner -> gas = (drag+rr) / max_traction, brake=0           |
+   |                                                           |
+   v                                                           |
+[Layer 2] corner-shape heuristic                               |
+   - trail-brake taper:  brake region's last `trail_brake_m`   |
+     metres replaced by linear ramp 1.0 -> 0.0 (in distance,   |
+     applied on the continuous distance axis -- works across   |
+     the lap-1/lap-2 boundary just like any other transition). |
+   - throttle ramp-up:   corner-region exit's first             |
+     `throttle_ramp_m` metres replaced by linear ramp           |
+     corner_exit_gas -> 1.0.                                    |
+   - either field == 0.0 disables that leg (no-op).            |
+   |                                                           |
+   v                                                           |
+[Layer 3] driver-lag 1st-order IIR low-pass                    |
+   y[n] = y[n-1] + alpha * (x[n] - y[n-1])                     |
+   alpha = dt / (driver_tau_s + dt)                            |
+   y[0] = x[0]; applied independently to gas and brake.        |
+   - driver_tau_s == 0.0 bypasses (Layer 2 output passes       |
+     through -> v1 bang-bang when trail=ramp=0 too).           |
+   |                                                           |
+   v                                                           |
+CSV write (AC schema + trailing `lap` column)
+```
+
+**Order is load-bearing.** Inverting heuristic and low-pass would smear the
+limit-label transitions before the heuristic can read them — taper/ramp
+distances would be applied to already-smoothed edges, producing
+double-smoothed shapes with the wrong total length.
+
+Layers 2 and 3 operate on the **continuous distance axis** (lap 1 [0..L] then
+lap 2 [L..2L]) so cross-boundary transitions are handled identically to any
+mid-lap transition.
+
+### Two-lap tiled simulation (simulator.py, §20)
+
+```
+track.to_points(ds) -> (distances_lap, radii_lap)
+       |
+       v
+   tile: distances_full = [distances_lap, distances_lap + L + ds_step]
+         radii_full     = [radii_lap, radii_lap]
+         lap_id_full    = [1...1, 2...2]
+       |
+       v
+   3-pass solver over the WHOLE tiled grid (single pass):
+     pass 1: v_corner[i]
+     pass 2: v_forward[i] -- continuous across the lap-1/lap-2 boundary,
+                             so lap 2's initial speed is naturally
+                             lap 1's end-of-lap forward-pass speed.
+     pass 3: v_brake[i] (backward) -- runs across the whole grid.
+       |
+       v
+   integrate time -> times[] (monotonic across both laps)
+       |
+       v
+   split:
+     - distances_out: per-lap-relative (resets at lap-2 start)
+     - lap1_time = times[n_lap - 1]
+     - lap2_time = times[-1] - times[n_lap - 1]
+     - SimResult.lap_time = lap2_time (the headline flying lap)
+     - SimResult.two_lap  = True
+```
+
+Monte-Carlo (`simulate_monte_carlo`) calls `simulate(..., two_lap=True)` N
+times and takes mean/std of **lap 2 only**. Lap 1 is computed once
+deterministically (standing-start variance is dominated by launch traction,
+not driver consistency).
+
+### `lap` column propagation
+
+- **Telemetry CSV (`sim_telemetry.write_synthetic_log`)**: header is
+  `timestamp_ms,gas,brake,distanceTraveled,speedKmh,normalizedCarPosition,lap`.
+  `timestamp_ms` is strictly monotonic across the boundary;
+  `distanceTraveled` and `normalizedCarPosition` reset to 0 at lap-2 start.
+- **Trace CSV (`report.write_trace_csv`)**: header is
+  `lap,distance_m,sim_speed_ms,sim_speed_kmh,ai_speed_kmh,time_s`.
+- **`--single-lap` mode**: lap column is present but constant `1`.
+
+### `--validate-against` lap-2 targeting
+
+`validate.validate_lap(..., target_lap=2)` extracts the lap-2 slice of
+`sim_result` (mask on `lap_id`), re-zeroes its time axis to start at 0, and
+compares against the real telemetry exactly as in v1. With `--single-lap`,
+`lap.py` passes `target_lap=1` and prints a warning ("comparing real flying
+lap against sim standing lap").
+
+### `fit_driver.py` lap selection
+
+When the input telemetry CSV has a `lap` column (sim-emitted via the round
+trip `lap.py` -> `fit_driver.py`), the fitter calls `telemetry.filter_to_lap`
+(default lap 2) before merging with the track. Real AC logs have no `lap`
+column and are unaffected. CLI: `--lap {1,2}` override.
+
+The validation sim inside `fit_driver.py` is two-lap; the reported
+`sim_lap_time_s` and the `source.delta_s` are lap-2 (flying) values.
+
+### File inventory (v1.1)
+
+**Modified:**
+- `src/lap_estimator/driver.py` — JSON loader; new fields with defaults; PyYAML dep removed.
+- `src/lap_estimator/simulator.py` — tiled two-lap mode; `lap_id`/`lap1_time`/`lap2_time` on `SimResult`; two-lap-aware `print_report`.
+- `src/lap_estimator/sim_telemetry.py` — 3-layer pipeline; `lap` column; cross-boundary distance handling; takes `driver` arg.
+- `src/lap_estimator/report.py` — `lap` column on trace CSV; lap-2 slice on comparison plot.
+- `src/lap_estimator/validate.py` — `target_lap=2` default; lap-slicing helper.
+- `src/lap_estimator/telemetry.py` — optional `lap` column read; `filter_to_lap` helper.
+- `lap.py` — `--single-lap` flag; passes driver into `write_synthetic_log`; validation lap-2 targeting; two-lap-aware plot label.
+- `fit_driver.py` — JSON write (no YAML); `--lap` flag; two-lap validation; lap-2 sim_lap_time_s.
+- `README.md` — driver JSON examples; two-lap default documented; PyYAML reference removed.
+
+**Migrated (YAML → JSON, contents preserved + new fields appended):**
+- `drivers/pro.yaml` → `drivers/pro.json`
+- `drivers/amateur.yaml` → `drivers/amateur.json` (amateur defaults bumped: tau=0.20, trail=45, ramp=55 per spec §6.2)
+- `drivers/tomas_nurburgring_sprint.yaml` → `drivers/tomas_nurburgring_sprint.json`
+- `drivers/ludvik_nurburgring_sprint.yaml` → `drivers/ludvik_nurburgring_sprint.json`
+- `drivers/tomas_lap{2,3,4,5}.yaml` → `drivers/tomas_lap{2,3,4,5}.json`
+
+**Deleted:** all `drivers/*.yaml`.
+
+### v1.1 smoke test (Nurburgring sprint_a, BMW 1M, ds=2.0)
+
+- `tomas_nurburgring_sprint.json`: lap 1 1:48.281 (matches v1 lap-time exactly), lap 2 1:45.111 +/- 0.087 (N=20). lap_2 <= lap_1 + sigma satisfied.
+- `--validate-against` (Tomas Lap5): real 1:47.560, sim lap 2 1:44.706, delta -2.854 s (-2.65%), verdict GOOD.
+- `pro.json` regression-safety with tau=0 trail=0 ramp=0: gas/brake transitions are abrupt 1.0->0.0 (no IIR smoothing); legacy bang-bang restored.
+- Loop closure (Pro -> sim telemetry -> re-fit, lap 2): skill_pct recovered 0.9710 vs 0.97 (0.10% error); sim lap delta 0.030 s.
+- Corner-exit stuck-at-extreme run (4 s window after brake-zero transitions): 0 samples (spec §11.16 requires <= 5). The 138-sample stuck-at-1.0 runs on long straights are expected (long-straight gas saturation is realistic, not a defect).
+- Trail-brake taper visible on lap-2 brake region (sample window dist=998..1056m): brake decays from peak 0.897 -> 0.101 over ~30 m, consistent with the configured `trail_brake_m=30.0` modulo low-pass.
+
+### Decisions / deviations from the v1.1 spec
+
+1. **Continuous-distance axis for Layer 2.** The trail-brake / throttle-ramp heuristics walk the *continuous* (cross-lap) distance grid so that taper distances are measured correctly even when a transition straddles the lap-1/lap-2 boundary. Per-lap-relative distances are only used for the `distanceTraveled` and `normalizedCarPosition` output columns.
+2. **`SimResult.lap_time` is the primary lap.** In two-lap mode this is lap 2 (flying); in single-lap mode it's lap 1. `lap1_time` / `lap2_time` are exposed separately for callers that need both.
+3. **The `Driver` `__init__` accepts all v1.1 fields** as keyword args. `fit_driver.py` constructs a temporary in-memory `Driver` for its validation pass; the v1.1 defaults are pinned via `DEFAULT_*` module constants imported from `driver.py`.
+4. **`sim_telemetry.write_synthetic_log` now requires a `driver` arg.** Callers that don't have a Driver object (currently none in the repo) can pass `None` for bang-bang behaviour; the function tolerates that.
+
+### What was NOT done (v1.1)
+
+- Did not extend `fit_driver.py` to fit `driver_tau_s` / `trail_brake_m` / `throttle_ramp_m` from telemetry — spec §13.9 defers this to v2 (requires a real driver-input model).
+- Did not touch `prep/` or `analysis/` modules — v1.1 is sim-layer only.
+- Did not commit (per user instruction).
+

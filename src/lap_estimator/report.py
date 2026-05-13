@@ -1,29 +1,39 @@
-"""Sim output artifacts: trace CSV, comparison PNG, generic speed-overlay helper."""
+"""Sim output artifacts: trace CSV (with `lap` column), comparison PNG, helper."""
 from __future__ import annotations
 
 import csv
 import os
 import warnings
 
+import numpy as np
+
 
 def write_trace_csv(result, output_path):
     """Write the per-point trace CSV used for downstream QA.
 
-    Columns: distance_m, sim_speed_ms, sim_speed_kmh, ai_speed_kmh, time_s.
+    v1.1 columns: lap, distance_m, sim_speed_ms, sim_speed_kmh, ai_speed_kmh, time_s.
     `ai_speed_kmh` is left blank when no AI reference is available.
+    `lap` is `1` or `2` in two-lap mode; constant `1` in single-lap mode.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     n = len(result.distances)
     ai = result.ai_speeds
+    lap_id = result.lap_id if result.lap_id is not None else np.ones(n, dtype=int)
     with open(output_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["distance_m", "sim_speed_ms", "sim_speed_kmh", "ai_speed_kmh", "time_s"])
+        w.writerow([
+            "lap", "distance_m", "sim_speed_ms", "sim_speed_kmh",
+            "ai_speed_kmh", "time_s",
+        ])
         for i in range(n):
             d = float(result.distances[i])
             v = float(result.speeds[i])
             ai_val = "" if ai is None else f"{float(ai[i]) * 3.6:.4f}"
             t = float(result.times[i]) if len(result.times) else 0.0
-            w.writerow([f"{d:.3f}", f"{v:.4f}", f"{v * 3.6:.4f}", ai_val, f"{t:.4f}"])
+            w.writerow([
+                int(lap_id[i]),
+                f"{d:.3f}", f"{v:.4f}", f"{v * 3.6:.4f}", ai_val, f"{t:.4f}",
+            ])
 
 
 def plot_speed_overlay(distances, series_dict, title, output_path,
@@ -61,13 +71,27 @@ def plot_speed_overlay(distances, series_dict, title, output_path,
 
 def write_comparison_plot(result, track_name, driver_name, output_path,
                           *, lap_time_label=None):
-    """Sim-vs-AI speed overlay (thin wrapper over plot_speed_overlay)."""
-    series = {"sim": result.speeds * 3.6}
-    if result.ai_speeds is not None:
-        series["ai"] = result.ai_speeds * 3.6
+    """Sim-vs-AI speed overlay.
+
+    In two-lap mode plots lap 2 sim + AI (lap 2 is the headline flying lap).
+    In single-lap mode plots the full single-lap sim.
+    """
+    if result.two_lap and result.lap_id is not None:
+        mask = result.lap_id == 2
+        sim_kmh = result.speeds[mask] * 3.6
+        ai_kmh = result.ai_speeds[mask] * 3.6 if result.ai_speeds is not None else None
+        distances = result.distances[mask]
+    else:
+        sim_kmh = result.speeds * 3.6
+        ai_kmh = result.ai_speeds * 3.6 if result.ai_speeds is not None else None
+        distances = result.distances
+
+    series = {"sim": sim_kmh}
+    if ai_kmh is not None:
+        series["ai"] = ai_kmh
     subtitle = f"Lap time: {lap_time_label}" if lap_time_label else None
     return plot_speed_overlay(
-        result.distances,
+        distances,
         series,
         title=f"{track_name} - {driver_name}",
         output_path=output_path,

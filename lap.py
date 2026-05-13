@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Lap Time Estimator - simulator CLI (car / track / driver).
 
-Run a single sim, optionally cross-validate against a real AC telemetry lap.
+Run a two-lap (default) sim; optionally cross-validate against a real AC
+telemetry lap. `--single-lap` opts out of the v1.1 two-lap default and
+restores byte-compatible v1 behaviour.
 """
 from __future__ import annotations
 
@@ -30,7 +32,6 @@ from lap_estimator.validate import validate_lap, write_bins_csv
 
 
 def find_car_data(car_path):
-    """Resolve a car data dir. Accepts either the dir containing engine.ini or a parent."""
     if os.path.isfile(os.path.join(car_path, "engine.ini")):
         return car_path
     data_dir = os.path.join(car_path, "data")
@@ -40,10 +41,7 @@ def find_car_data(car_path):
 
 
 def resolve_track(arg):
-    """Return (track_obj, source_kind, source_path).
-
-    source_kind in {'csv', 'json', 'builtin'}; source_path is the input string.
-    """
+    """Return (track_obj, source_kind, source_path)."""
     if os.path.isfile(arg) and arg.lower().endswith(".csv"):
         return Track.from_csv(arg), "csv", arg
     if os.path.isfile(arg) and arg.lower().endswith(".json"):
@@ -60,10 +58,12 @@ def main():
     parser = argparse.ArgumentParser(description="Lap Time Estimator")
     parser.add_argument("car", help="Path to car data directory")
     parser.add_argument("track", help="Track CSV path, JSON path, or built-in name")
-    parser.add_argument("driver", help="Path to driver YAML")
+    parser.add_argument("driver", help="Path to driver JSON (v1.1: JSON only, no YAML)")
     parser.add_argument("--ds", type=float, default=2.0)
     parser.add_argument("--all-tracks", action="store_true",
                         help="Run on all built-in tracks (ignores positional track)")
+    parser.add_argument("--single-lap", action="store_true",
+                        help="Disable v1.1 two-lap default; emit lap 1 only (legacy v1).")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--no-telemetry", action="store_true")
     parser.add_argument("--telemetry-dt-ms", type=int, default=100)
@@ -73,11 +73,18 @@ def main():
     parser.add_argument("--per-corner", action="store_true")
     args = parser.parse_args()
 
+    two_lap = not args.single_lap
+
     data_dir = find_car_data(args.car)
     car = Car(data_dir)
     driver = Driver.load(args.driver)
     print(f"\nLoaded: {car}")
-    print(f"Driver: {driver.name} (skill={driver.skill_pct:.2f}, sigma={driver.consistency_sigma:.2f})")
+    print(
+        f"Driver: {driver.name} "
+        f"(skill={driver.skill_pct:.2f}, sigma={driver.consistency_sigma:.2f}, "
+        f"tau={driver.driver_tau_s:.2f}s, trail={driver.trail_brake_m:.0f}m, "
+        f"ramp={driver.throttle_ramp_m:.0f}m)"
+    )
 
     if args.all_tracks:
         tracks = [(name, BUILTIN_TRACKS[name](), "builtin", name) for name in BUILTIN_TRACKS]
@@ -86,13 +93,13 @@ def main():
         tracks = [(track.name, track, kind, src)]
 
     for _name, track, kind, src in tracks:
-        print(f"\nSimulating {track.name}...")
+        print(f"\nSimulating {track.name}{' (single-lap)' if not two_lap else ' (two-lap)'}...")
         mc = None
         if driver.consistency_sigma > 0:
-            mc = simulate_monte_carlo(car, track, driver, ds=args.ds)
+            mc = simulate_monte_carlo(car, track, driver, ds=args.ds, two_lap=two_lap)
             result = mc.representative
         else:
-            result = simulate(car, track, driver, ds=args.ds)
+            result = simulate(car, track, driver, ds=args.ds, two_lap=two_lap)
 
         print_report(car, track, result, driver=driver, mc=mc)
 
@@ -105,10 +112,19 @@ def main():
 
         if not args.no_plot:
             plot_path = f"{stem}_sim_vs_ai.png"
+            if result.two_lap:
+                lap_label = (
+                    f"L2 {mc.mean_lap_time:.3f}s +/- {mc.std_lap_time:.3f} (N={mc.n_runs})"
+                    if mc is not None else f"L2 {result.lap2_time_str}"
+                )
+            else:
+                lap_label = (
+                    f"{mc.mean_lap_time:.3f}s +/- {mc.std_lap_time:.3f} (N={mc.n_runs})"
+                    if mc is not None else result.lap_time_str
+                )
             ok = write_comparison_plot(
                 result, track.name, driver.name, plot_path,
-                lap_time_label=(f"{mc.mean_lap_time:.3f}s ± {mc.std_lap_time:.3f} (N={mc.n_runs})"
-                                if mc is not None else result.lap_time_str),
+                lap_time_label=lap_label,
             )
             if ok:
                 print(f"  Wrote plot:  {plot_path}")
@@ -116,18 +132,23 @@ def main():
         if not args.no_telemetry:
             tel_path = f"{stem}_sim_telemetry.csv"
             write_synthetic_log(
-                result, car, track.total_length_m, tel_path,
+                result, car, driver, track.total_length_m, tel_path,
                 telemetry_dt_ms=args.telemetry_dt_ms,
             )
             print(f"  Wrote telemetry: {tel_path}")
 
         if args.validate_against:
             if kind != "csv":
-                print("ERROR: --validate-against requires a CSV-backed track.", file=sys.stderr)
+                print("ERROR: --validate-against requires a CSV-backed track.",
+                      file=sys.stderr)
                 sys.exit(2)
+            target_lap = 2 if result.two_lap else 1
+            if not result.two_lap:
+                print("  warn: --single-lap set; comparing real (flying) lap against "
+                      "sim lap 1 (standing).")
             vr = validate_lap(
                 car, track, result, args.validate_against,
-                bin_m=args.bin_m, per_corner=args.per_corner,
+                bin_m=args.bin_m, per_corner=args.per_corner, target_lap=target_lap,
             )
             _print_validation(vr, src, args.driver)
             bins_path = f"{stem}_validation_bins.csv"
@@ -137,6 +158,7 @@ def main():
                 _plot_validation_overlay(
                     car, track, result, args.validate_against,
                     f"{stem}_validation_overlay.png", driver.name,
+                    target_lap=target_lap,
                 )
 
 
@@ -145,26 +167,34 @@ def _print_validation(vr, track_path, driver_path):
     print(f"Track:     {track_path}")
     print(f"Driver:    {driver_path}")
     print(f"Real lap:  {_fmt(vr.real_lap_time_s)}")
-    print(f"Sim lap:   {_fmt(vr.sim_lap_time_s)}  (predicted)")
+    label = f"Sim lap {vr.target_lap}" + (
+        " (flying)" if vr.target_lap == 2 else " (standing)"
+    )
+    print(f"{label}: {_fmt(vr.sim_lap_time_s)}  (predicted)")
     print(f"Delta:     {_signed(vr.delta_s)} s  ({_signed_pct(vr.delta_pct)})")
     print(f"Verdict:   {vr.verdict}")
 
 
-def _plot_validation_overlay(car, track, sim_result, real_telem_path, output_path, driver_name):
+def _plot_validation_overlay(car, track, sim_result, real_telem_path, output_path,
+                             driver_name, *, target_lap=2):
     from lap_estimator.telemetry import merge_with_track, read_ac_log
+    import numpy as np
     telem = read_ac_log(real_telem_path)
     merged = merge_with_track(telem, track)
-    import numpy as np
-    # Resample real speed onto sim distance grid
-    d = sim_result.distances
+    if sim_result.lap_id is not None and sim_result.two_lap:
+        mask = sim_result.lap_id == target_lap
+        d = sim_result.distances[mask]
+        sim_kmh = sim_result.speeds[mask] * 3.6
+    else:
+        d = sim_result.distances
+        sim_kmh = sim_result.speeds * 3.6
     real_kmh = np.interp(d, merged["distance_m"], merged["speedKmh"])
-    series = {
-        "sim": sim_result.speeds * 3.6,
-        "real": real_kmh,
-    }
-    plot_speed_overlay(d, series,
-                       title=f"{track.name} - {driver_name} (validation)",
-                       output_path=output_path)
+    series = {"sim": sim_kmh, "real": real_kmh}
+    plot_speed_overlay(
+        d, series,
+        title=f"{track.name} - {driver_name} (validation, sim lap {target_lap})",
+        output_path=output_path,
+    )
     print(f"  Wrote overlay: {output_path}")
 
 
