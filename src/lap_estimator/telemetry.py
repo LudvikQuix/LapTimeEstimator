@@ -4,6 +4,10 @@ v1.1: tolerates an optional trailing `lap` column (present in sim-emitted
 telemetry from `sim_telemetry.write_synthetic_log`). When present, callers
 can filter by lap before merging (default consumer: `fit_driver.py` picks
 lap 2 by default).
+
+v1.2: opportunistically loads `steerAngle` (warning once if absent across a
+batch is the CLI's job, not ours). Any extra numeric columns present in the
+CSV pass through unchanged onto the merged frame so callers can read them.
 """
 from __future__ import annotations
 
@@ -13,25 +17,29 @@ import numpy as np
 
 REQUIRED_COLUMNS = ("timestamp_ms", "gas", "brake", "distanceTraveled",
                     "speedKmh", "normalizedCarPosition")
-OPTIONAL_COLUMNS = ("lap",)
+OPTIONAL_INT_COLUMNS = ("lap",)
+# Known opportunistic float passthroughs. Anything else that parses as float
+# also passes through (see `read_ac_log`).
+OPTIONAL_FLOAT_COLUMNS = ("steerAngle",)
 
 
 def read_ac_log(path):
     """Parse an AC telemetry CSV into a dict of numpy arrays.
 
-    Hard error if any required column is missing. The optional `lap` column
-    (sim-emitted only) is exposed when present.
+    Hard error if any required column is missing. Optional `lap` column is
+    exposed when present (int). Opportunistic `steerAngle` and any other
+    numeric extras pass through as float arrays.
     """
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
             raise ValueError(f"Empty AC telemetry CSV: {path}")
-        missing = set(REQUIRED_COLUMNS) - set(reader.fieldnames)
+        fieldnames = list(reader.fieldnames)
+        missing = set(REQUIRED_COLUMNS) - set(fieldnames)
         if missing:
             raise ValueError(
                 f"AC telemetry CSV {path} missing required columns: {sorted(missing)}"
             )
-        present_optional = [c for c in OPTIONAL_COLUMNS if c in reader.fieldnames]
         rows = list(reader)
     if not rows:
         raise ValueError(f"AC telemetry CSV {path} has no data rows")
@@ -39,9 +47,31 @@ def read_ac_log(path):
     out = {}
     for col in REQUIRED_COLUMNS:
         out[col] = np.array([float(r[col]) for r in rows], dtype=float)
-    for col in present_optional:
-        # `lap` is an int; keep it as int.
-        out[col] = np.array([int(float(r[col])) for r in rows], dtype=int)
+    # Integer passthrough (only `lap` today).
+    for col in OPTIONAL_INT_COLUMNS:
+        if col in fieldnames:
+            out[col] = np.array([int(float(r[col])) for r in rows], dtype=int)
+    # Float passthroughs: known opportunistic columns first, then any other
+    # CSV column that parses as a float. Non-numeric extras are silently
+    # ignored (warnings live at the CLI layer).
+    handled = set(REQUIRED_COLUMNS) | set(OPTIONAL_INT_COLUMNS)
+    for col in fieldnames:
+        if col in handled:
+            continue
+        values: list[float] = []
+        ok = True
+        for r in rows:
+            raw = r.get(col, "")
+            if raw is None or raw == "":
+                values.append(float("nan"))
+                continue
+            try:
+                values.append(float(raw))
+            except (TypeError, ValueError):
+                ok = False
+                break
+        if ok and values:
+            out[col] = np.array(values, dtype=float)
 
     # Sort by timestamp (lap-wrap-at-front fix). Apply to all columns.
     order = np.argsort(out["timestamp_ms"])
@@ -82,7 +112,11 @@ def filter_to_lap(telem, lap_value):
 
 
 def merge_with_track(telem, track):
-    """Interpolate track features (radius, gradient) onto telemetry samples."""
+    """Interpolate track features (radius, gradient) onto telemetry samples.
+
+    Any extra numeric columns present on `telem` (e.g. `steerAngle`) are
+    passed through to the merged frame unchanged.
+    """
     if not getattr(track, "is_csv_backed", False):
         raise ValueError("merge_with_track requires a CSV-backed track")
     d_src = track.csv_data["distance_m"]
@@ -108,4 +142,13 @@ def merge_with_track(telem, track):
         out["gradient_pct"] = np.interp(dist, d_src, track.csv_data["gradient_pct"])
     if "lap" in telem:
         out["lap"] = telem["lap"]
+    # Passthrough: any numeric extras the loader picked up.
+    handled = {
+        "timestamp_ms", "gas", "brake", "distanceTraveled", "speedKmh",
+        "normalizedCarPosition", "lap",
+    }
+    for col, arr in telem.items():
+        if col in handled:
+            continue
+        out[col] = arr
     return out

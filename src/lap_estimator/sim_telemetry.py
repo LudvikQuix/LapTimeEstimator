@@ -29,7 +29,7 @@ AC_HEADER = (
 
 
 def write_synthetic_log(sim_result, car, driver, track_total_length_m: float,
-                        output_path: str, *, telemetry_dt_ms: int = 100) -> None:
+                        output_path: str, *, telemetry_dt_ms: int = 10) -> None:
     """Write the synthetic telemetry CSV (AC schema + `lap` column).
 
     Args:

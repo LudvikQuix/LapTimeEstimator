@@ -8,6 +8,14 @@ laps by default (lap 1 standing, lap 2 flying). Emitted gas/brake traces
 include a trail-brake taper, throttle ramp, and a 1st-order driver-lag
 low-pass so the synthetic telemetry looks human-plausible.
 
+v1.2: `fit_driver.py` measures `driver_tau_s` / `trail_brake_m` /
+`throttle_ramp_m` (plus statistic-only `pedal_press_rate_per_s` and
+`steering_aggression_deg_per_s`) from telemetry instead of hand-defaults.
+`--newest N` (default 10) keeps only the freshest laps by mtime when a
+glob or long positional list resolves above the cap. The synthetic
+telemetry default cadence is now 10 ms (was 100 ms) -- pass
+`--telemetry-dt-ms 100` to revert.
+
 ## Requirements
 
 - Python 3.10+
@@ -70,7 +78,7 @@ python lap.py <car_dir> <track> <driver_json> [options]
 - `--single-lap` -- disable v1.1 two-lap default; emit lap 1 only (legacy v1).
 - `--no-plot` -- skip PNG generation.
 - `--no-telemetry` -- skip synthetic telemetry CSV.
-- `--telemetry-dt-ms 100` -- cadence for synthetic telemetry CSV.
+- `--telemetry-dt-ms 10` -- cadence for synthetic telemetry CSV (v1.2 default; pass `100` to restore v1.1 behaviour).
 - `--validate-against <real.csv>` -- additionally compare sim **lap 2** vs a real AC lap.
 - `--bin-m 100` / `--per-corner` -- validation delta-table mode.
 
@@ -83,15 +91,31 @@ Outputs (next to track CSV, or in cwd for built-ins):
 ### `fit_driver.py` -- derive a driver JSON from AC telemetry
 
 ```
-python fit_driver.py <car_dir> <track_csv> <ac_telemetry.csv> <output.json> \
-                     [--name <driver_name>] [--no-validate] [--no-plot] [--lap {1,2}]
+python fit_driver.py <car_dir> <track_csv> <output.json> \
+                     [<lap1.csv> <lap2.csv> ...] \
+                     [--laps-glob "<pattern>"] [--newest 10] \
+                     [--ds 2.0] [--name <n>] [--no-validate] [--no-plot] [--lap {1,2}]
 ```
 
-Computes `skill_pct` (85th percentile of per-point lateral-G utilisation) and
-`consistency_sigma` (scaled stdev of utilisation). Writes a JSON with a `source`
-block and (by default) runs a two-lap validation sim, reporting **sim lap 2** as
-the comparison point. When the input telemetry has a `lap` column (sim-emitted),
-picks the chosen lap (default `--lap 2`).
+- **Requires >=2 laps** (after lap selection). Single-lap input is rejected.
+- `--laps-glob` is mutually exclusive with positional CSVs.
+- `--newest N` (default 10, minimum 2) keeps only the freshest N laps by file
+  mtime when the candidate list is larger. Lex tiebreak on equal mtimes.
+
+Outputs include the v1.2 `profile.dynamic` block (measured `driver_tau_s`,
+`trail_brake_m`, `throttle_ramp_m`, `pedal_press_rate_per_s`,
+`steering_aggression_deg_per_s`, plus per-field `measured` booleans and
+`sample_counts`). The top-level `driver_tau_s` / `trail_brake_m` /
+`throttle_ramp_m` fields mirror the measured values (or fall back to
+hand-defaults when the measurement pool is too small).
+
+Computes `skill_pct` (85th percentile of pooled per-point lateral-G
+utilisation across all selected laps) and `consistency_sigma` (scaled
+stdev of the pool). `source` records `telemetry_csvs` (list), `n_laps`,
+`n_finished_laps`, `real_lap_times_s`, `pooled_sample_count`, and a
+`lap_selection` block describing how the candidate list was filtered.
+By default runs a two-lap validation sim and reports **sim lap 2** vs
+the mean real lap time.
 
 ### `prep/prep_car.py` -- decrypt an AC car
 
@@ -129,28 +153,64 @@ Telemetry-free. Reads the track CSV + `tracks_config.json` thresholds, writes:
 - `<stem>_corners.json` -- corner notation (schema in spec §17.4)
 - `<stem>_corner_map.png`, `<stem>_speed_vs_position.png`
 
-## Driver JSON schema (v1.1)
+## Driver JSON schema (v1.2)
 
 ```json
 {
-  "name": "Pro",
-  "skill_pct": 0.97,
-  "consistency_sigma": 0.1,
-  "driver_tau_s": 0.12,
-  "trail_brake_m": 30.0,
-  "throttle_ramp_m": 40.0,
+  "name": "tomas",
+  "skill_pct": 0.92,
+  "consistency_sigma": 1.5,
+  "driver_tau_s": 0.14,
+  "trail_brake_m": 28.5,
+  "throttle_ramp_m": 47.0,
+  "profile": {
+    "dynamic": {
+      "driver_tau_s": 0.14,
+      "trail_brake_m": 28.5,
+      "throttle_ramp_m": 47.0,
+      "pedal_press_rate_per_s": 6.4,
+      "steering_aggression_deg_per_s": null,
+      "measured": {
+        "driver_tau_s": true,
+        "trail_brake_m": true,
+        "throttle_ramp_m": true,
+        "pedal_press_rate_per_s": true,
+        "steering_aggression_deg_per_s": false
+      },
+      "sample_counts": {
+        "pedal_leading_edges": 47,
+        "brake_taper_segments": 46,
+        "throttle_ramp_segments": 46,
+        "steering_samples": 0
+      }
+    }
+  },
   "source": {
-    "telemetry_csv": "...",
+    "telemetry_csvs": ["samples/aclog/Lap1.csv", "..."],
     "track_csv": "...",
     "car_data_dir": "...",
-    "real_lap_time_s": 102.135,
-    "sim_lap_time_s": 103.402,
-    "delta_s": 1.267,
+    "n_laps": 5,
+    "n_finished_laps": 5,
+    "real_lap_times_s": [108.16, 109.52, 107.56, 108.48, 117.56],
+    "real_lap_time_s": 110.256,
+    "pooled_sample_count": 17101,
+    "sim_lap_time_s": 105.579,
+    "delta_s": -4.677,
+    "lap_selection": {
+      "rule": "newest-5-to-10",
+      "candidates_considered": 5,
+      "selected_count": 5,
+      "selected_sources": ["samples/aclog/Lap1.csv", "..."]
+    },
     "fitted_at": "2026-05-13T14:22:01Z",
-    "fit_version": "1"
+    "fit_version": "2"
   }
 }
 ```
+
+Pre-v1.2 driver JSONs (no `profile` block) continue to load via `Driver.load`
+and produce identical sim output. `profile.dynamic.<field>` wins over the
+top-level mirror when both are present.
 
 Field semantics:
 - `name` (required, string) -- used in output filenames.
@@ -165,7 +225,14 @@ Field semantics:
 - `throttle_ramp_m` (optional, default 40.0) -- metres; linear ramp of `gas`
   from the corner-region partial throttle to 1.0 over the first `throttle_ramp_m`
   of every corner-exit acceleration. `0` disables.
+- `profile.dynamic` (v1.2, optional) -- measured driver dynamics. Per-field
+  `measured` booleans flag whether the value came from telemetry (`true`) or
+  the hand-default fallback (`false`). `pedal_press_rate_per_s` and
+  `steering_aggression_deg_per_s` are statistics only -- not consumed by the
+  v1.2 simulator; v1.3 hook.
 - `source` (optional) -- provenance block populated by `fit_driver.py`.
+  v1.2 adds `lap_selection` (rule + candidate/selected counts + paths) and
+  bumps `fit_version` to `"2"` when `profile.dynamic` is populated.
 
 `consistency_sigma > 0` triggers a 20-run Monte-Carlo; the reported lap-2 time
 becomes `<mean> +/- <stdev> (N=20)`. The trace CSV / plot / synthetic-telemetry

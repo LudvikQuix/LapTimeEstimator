@@ -7,6 +7,12 @@ noise. v1.1 adds three sim-telemetry-only shape fields consumed by
   - `trail_brake_m`   -- linear brake-taper distance on corner entry.
   - `throttle_ramp_m` -- linear throttle-ramp distance on corner exit.
 
+v1.2 adds the `profile.dynamic` block; when present, the measured values
+override the top-level fields for the three sim-consumed fields. The two
+statistics-only fields (`pedal_press_rate_per_s`,
+`steering_aggression_deg_per_s`) are also loaded onto the dataclass but the
+v1.2 simulator does not consume them.
+
 Format: JSON only. No YAML fallback (v1.1 clean break -- see spec §6.2).
 """
 from __future__ import annotations
@@ -32,6 +38,9 @@ class Driver:
     driver_tau_s: float = DEFAULT_DRIVER_TAU_S
     trail_brake_m: float = DEFAULT_TRAIL_BRAKE_M
     throttle_ramp_m: float = DEFAULT_THROTTLE_RAMP_M
+    # v1.2 statistics-only fields. Not wired into the simulator yet.
+    pedal_press_rate_per_s: float | None = None
+    steering_aggression_deg_per_s: float | None = None
     source: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
 
@@ -53,21 +62,29 @@ class Driver:
             raise ValueError(
                 f"Driver JSON {path}: consistency_sigma must be >= 0, got {sigma}"
             )
-        tau = float(raw.get("driver_tau_s", DEFAULT_DRIVER_TAU_S))
-        if tau < 0:
-            raise ValueError(
-                f"Driver JSON {path}: driver_tau_s must be >= 0, got {tau}"
-            )
-        trail = float(raw.get("trail_brake_m", DEFAULT_TRAIL_BRAKE_M))
-        if trail < 0:
-            raise ValueError(
-                f"Driver JSON {path}: trail_brake_m must be >= 0, got {trail}"
-            )
-        ramp = float(raw.get("throttle_ramp_m", DEFAULT_THROTTLE_RAMP_M))
-        if ramp < 0:
-            raise ValueError(
-                f"Driver JSON {path}: throttle_ramp_m must be >= 0, got {ramp}"
-            )
+
+        profile = raw.get("profile") or {}
+        dynamic = profile.get("dynamic") if isinstance(profile, dict) else None
+        if not isinstance(dynamic, dict):
+            dynamic = {}
+
+        # v1.2 precedence: profile.dynamic.<field> > top-level <field> > default.
+        tau = _resolve_field(
+            path, "driver_tau_s", dynamic, raw, DEFAULT_DRIVER_TAU_S,
+            min_value=0.0, fail_on_dynamic_max=1.0,
+        )
+        trail = _resolve_field(
+            path, "trail_brake_m", dynamic, raw, DEFAULT_TRAIL_BRAKE_M,
+            min_value=0.0,
+        )
+        ramp = _resolve_field(
+            path, "throttle_ramp_m", dynamic, raw, DEFAULT_THROTTLE_RAMP_M,
+            min_value=0.0,
+        )
+        # Statistics-only; warn-don't-fail per spec §7.2.
+        press_rate = _resolve_optional(dynamic, "pedal_press_rate_per_s")
+        steer_aggr = _resolve_optional(dynamic, "steering_aggression_deg_per_s")
+
         name = raw.get("name") or os.path.splitext(os.path.basename(path))[0]
         source = raw.get("source") or {}
         return cls(
@@ -77,6 +94,8 @@ class Driver:
             driver_tau_s=tau,
             trail_brake_m=trail,
             throttle_ramp_m=ramp,
+            pedal_press_rate_per_s=press_rate,
+            steering_aggression_deg_per_s=steer_aggr,
             source=source if isinstance(source, dict) else {},
             raw=raw,
         )
@@ -97,6 +116,52 @@ class Driver:
         clamped to a sane band.
         """
         return _DriverScaledCar(car, self, rng=rng, noise=noise)
+
+
+def _resolve_field(
+    path: str,
+    key: str,
+    dynamic: dict,
+    raw: dict,
+    default: float,
+    *,
+    min_value: float,
+    fail_on_dynamic_max: float | None = None,
+) -> float:
+    """Resolve a driver field with v1.2 precedence + validation.
+
+    `profile.dynamic.<key>` wins; falls back to `raw[<key>]`; falls back to
+    `default`. Top-level negative values fail fast (legacy v1 behaviour).
+    `profile.dynamic.<key>` fail-fast bounds per spec §7.2.
+    """
+    if key in dynamic:
+        value = float(dynamic[key])
+        if value < 0.0:
+            raise ValueError(
+                f"Driver JSON {path}: profile.dynamic.{key} must be >= 0, got {value}"
+            )
+        if fail_on_dynamic_max is not None and not (0.0 <= value <= fail_on_dynamic_max):
+            raise ValueError(
+                f"Driver JSON {path}: profile.dynamic.{key} must be in "
+                f"[0.0, {fail_on_dynamic_max}], got {value}"
+            )
+        return value
+    value = float(raw.get(key, default))
+    if value < min_value:
+        raise ValueError(
+            f"Driver JSON {path}: {key} must be >= {min_value}, got {value}"
+        )
+    return value
+
+
+def _resolve_optional(dynamic: dict, key: str) -> float | None:
+    """Optional statistic field; returns `None` if absent or `null`."""
+    if key not in dynamic:
+        return None
+    value = dynamic[key]
+    if value is None:
+        return None
+    return float(value)
 
 
 class _DriverScaledCar:

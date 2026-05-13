@@ -1,0 +1,68 @@
+{
+  "name": "tomas",
+  "skill_pct": 0.9207,
+  "consistency_sigma": 1.5,
+  "driver_tau_s": 0.0344,
+  "trail_brake_m": 5.51,
+  "throttle_ramp_m": 29.01,
+  "profile": {
+    "dynamic": {
+      "driver_tau_s": 0.0344,
+      "trail_brake_m": 5.51,
+      "throttle_ramp_m": 29.01,
+      "pedal_press_rate_per_s": 11.6167,
+      "steering_aggression_deg_per_s": null,
+      "measured": {
+        "driver_tau_s": true,
+        "pedal_press_rate_per_s": true,
+        "trail_brake_m": true,
+        "throttle_ramp_m": true,
+        "steering_aggression_deg_per_s": false
+      },
+      "sample_counts": {
+        "pedal_leading_edges": 47,
+        "brake_taper_segments": 46,
+        "throttle_ramp_segments": 46,
+        "steering_samples": 0
+      }
+    }
+  },
+  "source": {
+    "telemetry_csvs": [
+      "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap1.csv",
+      "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap4.csv",
+      "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap3.csv",
+      "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap2.csv",
+      "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap5.csv"
+    ],
+    "track_csv": "tracks_csv/ks_nurburgring/layout_sprint_a.csv",
+    "car_data_dir": "cars_csv/bmw_1m",
+    "n_laps": 5,
+    "n_finished_laps": 5,
+    "real_lap_times_s": [
+      117.56,
+      108.479,
+      108.16,
+      109.52,
+      107.56
+    ],
+    "real_lap_time_s": 110.256,
+    "pooled_sample_count": 17101,
+    "sim_lap_time_s": 105.579,
+    "delta_s": -4.677,
+    "lap_selection": {
+      "rule": "newest-5-to-10",
+      "candidates_considered": 5,
+      "selected_count": 5,
+      "selected_sources": [
+        "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap1.csv",
+        "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap4.csv",
+        "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap3.csv",
+        "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap2.csv",
+        "samples/aclog/2026-04-14T140659_113Z_tomas_nurburgring_bmw_1m_Lap5.csv"
+      ]
+    },
+    "fitted_at": "2026-05-13T13:29:00Z",
+    "fit_version": "2"
+  }
+}

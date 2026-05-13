@@ -66,7 +66,9 @@ def main():
                         help="Disable v1.1 two-lap default; emit lap 1 only (legacy v1).")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--no-telemetry", action="store_true")
-    parser.add_argument("--telemetry-dt-ms", type=int, default=100)
+    parser.add_argument("--telemetry-dt-ms", type=int, default=10,
+                        help="Cadence (ms) of the synthetic telemetry CSV. "
+                             "v1.2 default is 10 (was 100); pass 100 to revert.")
     parser.add_argument("--validate-against", default=None,
                         help="Path to real AC telemetry CSV for cross-track validation.")
     parser.add_argument("--bin-m", type=int, default=100)
