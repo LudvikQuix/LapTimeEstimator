@@ -143,6 +143,10 @@ def unpack_acd(acd_path, car_name, output_dir):
     return files
 
 
+# Public alias preferred by spec / new prep_car.py
+decode_acd = unpack_acd
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)

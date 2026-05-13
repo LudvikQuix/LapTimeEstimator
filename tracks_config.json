@@ -1,0 +1,21 @@
+{
+  "_comment": "Corner classification thresholds (meters) and colors used for track map and plot overlays.",
+  "corner_thresholds": {
+    "hairpin_max": 60,
+    "tight_max": 150,
+    "sweeper_max": 400
+  },
+  "colors": {
+    "hairpin": "#f87171",
+    "tight": "#fb923c",
+    "sweeper": "#fbbf24",
+    "straight": "#34d399",
+    "start_finish": "#ffffff",
+    "marker": "#fff8e1",
+    "track_dot": "#ef4444"
+  },
+  "corner_labels": {
+    "min_length_m": 20
+  },
+  "default_track": "tracks_csv/ks_nurburgring/layout_sprint_a.csv"
+}
