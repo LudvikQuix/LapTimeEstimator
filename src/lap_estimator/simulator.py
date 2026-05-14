@@ -13,12 +13,31 @@ v1.1: two-lap "tiled" simulation (spec §20). The segment list is tiled twice;
 lap 2's forward-pass initial speed is lap 1's end-of-lap speed (flying start);
 output arrays carry a per-point `lap_id` (1 or 2). `times` is monotonic across
 the boundary. `--single-lap` (CLI) maps to `two_lap=False`.
+
+v2 (spec §21.4): `simulate_stint(...)` runs an N-lap stint by calling
+`simulate(..., two_lap=False)` once per lap and threading per-wheel tyre state
+through `tyre_state.update_segments_in_place`. Between laps the state is
+reduced to a scalar grip multiplier `(mu_x_scale, mu_y_scale)` that scales the
+next lap's solver pass. Back-compat: with `n_laps == 2` and uncalibrated
+tyres (calibration.measured == False), `simulate_stint` delegates straight to
+the existing `simulate(..., two_lap=True)` path so output is byte-equivalent
+to v1.2.1 (spec §11.31, §20 v2 note).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from .tyre_state import (
+    GripScaledCar,
+    TyreCalibration,
+    TyreState,
+    build_car_tyre_model,
+    combined_grip_envelope,
+    derive_radius_sign,
+    update_segments_in_place,
+)
 
 
 @dataclass
@@ -146,18 +165,66 @@ def _three_pass(scaled, distances, radii, *, v_init=0.0, v_min=5.0):
     return speeds, labels, v_corner, v_forward, v_brake
 
 
-def simulate(car, track, driver=None, *, ds=2.0, rng=None, noise=False, two_lap=True):
+class _DragScaledCar:
+    """Wrap a car (or driver-scaled car) so total drag is multiplied by `drag_scale`.
+
+    v1.3 (spec §21.3 — Solver wiring): `drag_scale` from
+    `combined_grip_envelope` scales the total drag force the 3-pass solver
+    applies. Drag enters the solver via `max_accel(v)` (= traction − drag − rr)
+    and `max_braking_decel(v)` (= (grip_force + drag) / mass), so we scale
+    both `drag_force(v)` and `rolling_resistance(v)` at the wrapper. This is
+    the natural single-point seam — every caller of `max_accel` /
+    `max_braking_decel` (Car, DriverScaledCar, GripScaledCar) ultimately
+    delegates the drag computation to `self._car.drag_force / .rolling_resistance`,
+    so wrapping the inner car here covers all three.
+
+    `drag_scale == 1.0` is byte-equivalent to the unwrapped car (§11.30).
+    """
+
+    def __init__(self, inner, drag_scale: float):
+        self._inner = inner
+        self._drag_scale = float(drag_scale)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def drag_force(self, speed_ms):
+        return self._drag_scale * self._inner.drag_force(speed_ms)
+
+    def rolling_resistance(self, speed_ms):
+        return self._drag_scale * self._inner.rolling_resistance(speed_ms)
+
+
+def simulate(car, track, driver=None, *, ds=2.0, rng=None, noise=False,
+             two_lap=True, drag_scale: float = 1.0):
     """Run a single deterministic (or noisy) lap, optionally as a two-lap tiled run.
 
     `driver` is optional. When `None`, the raw `car` is used (skill_pct=1.0).
     `two_lap=True` (default, v1.1) tiles the segment list twice and runs a single
     3-pass over the 2x grid; lap 2 inherits lap 1's end-of-lap forward speed
     naturally via the forward pass crossing the boundary.
+
+    v1.3 (spec §21.3 — Drag plumbing): `drag_scale` (kwarg-only) multiplies the
+    total drag force (aerodynamic drag + rolling resistance) applied per
+    segment in the 3-pass solver. Default `1.0` is byte-equivalent to v2
+    (§11.30). When called from `simulate_stint`, the value comes from the
+    third return of `tyre_state.combined_grip_envelope` and reflects the
+    asymmetric pressure-drag model (`f_pressure_drag`).
     """
-    if driver is not None:
-        scaled = driver.wrap(car, rng=rng, noise=noise)
+    # v1.3 drag plumbing (spec §21.3 "Solver wiring"). Apply the drag wrapper
+    # to the INNERMOST car so every downstream wrapper (`DriverScaledCar`,
+    # `GripScaledCar`) reads the scaled drag via `self._car.drag_force(...)`
+    # and `self._car.rolling_resistance(...)`. Wrapping the outer layer would
+    # not work — those wrappers delegate to `self._car`, not back through
+    # `self`, when computing `max_accel` / `max_braking_decel`.
+    if drag_scale != 1.0:
+        car_for_sim = _DragScaledCar(car, drag_scale)
     else:
-        scaled = car
+        car_for_sim = car
+    if driver is not None:
+        scaled = driver.wrap(car_for_sim, rng=rng, noise=noise)
+    else:
+        scaled = car_for_sim
 
     distances_lap, radii_lap = track.to_points(ds)
     n_lap = len(distances_lap)
@@ -343,3 +410,196 @@ def _estimate_0_x(car, target_kph: float = 100.0) -> float:
         v += a * dt
         t += dt
     return t
+
+
+# ---------------------------------------------------------------------------
+# v2 stint simulation (spec §21.4)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StintResult:
+    """Multi-lap stint result (spec §21.4).
+
+    Lists are ordered lap-1-first. `tyre_state_history` has length `n_laps + 1`
+    (index 0 is the initial state, index k is end-of-lap-k).
+
+    `per_point_states` (v2): list (length n_laps) of dicts; each dict has the
+    structure
+        {"temp_C": {FL: np.array, ...},
+         "wear_pct": {FL: np.array, ...},
+         "pressure_psi": {FL: np.array, ...}}
+    aligned with `per_lap_sim_results[k].distances`. Used by sim_telemetry to
+    emit the 12 trailing state columns (spec §7.12).
+
+    `compound` (v2, spec §21.11): the active `Compound` the stint was run
+    against. Drives `f_pressure/f_temp/f_wear` and the `dy0/dx0` baselines.
+    """
+    n_laps: int
+    setup: object  # Setup; typed as object to avoid import cycles
+    calibration: TyreCalibration
+    lap_times_s: list  # length n_laps
+    tyre_state_history: list  # length n_laps + 1
+    per_lap_sim_results: list  # length n_laps (SimResult per lap)
+    per_point_states: list = field(default_factory=list)  # length n_laps
+    compound: object | None = None  # Compound; None for pre-v2.5 callers.
+
+
+def simulate_stint(car, track, driver, *, n_laps: int, setup,
+                   calibration: TyreCalibration | None = None,
+                   compound=None,
+                   ds: float = 2.0) -> StintResult:
+    """Run an N-lap stint with per-wheel tyre state (spec §21.4).
+
+    Args:
+        car: Car physics model.
+        track: CSV-backed Track.
+        driver: Driver model.
+        n_laps: Number of laps in [1, 50].
+        setup: Setup (initial cold pressures + ambient).
+        calibration: TyreCalibration (defaults to hand-defaults if None).
+        compound: Active `Compound` (spec §21.11). When None, falls back to
+            `car.default_compound`. Determines `f_pressure/f_temp/f_wear` LUTs
+            and the `dy0/dx0` baselines used for grip scaling.
+        ds: Distance step (m). Same as `simulate(...)`.
+
+    Returns:
+        StintResult.
+
+    Back-compat: when `n_laps == 2` and `calibration.measured == False`, this
+    delegates to `simulate(..., two_lap=True)` and returns a StintResult whose
+    `per_lap_sim_results` carries the v1.1 two-lap result. Telemetry emission
+    treats this as constant-state across both laps (spec §14.12 item 14,
+    §11.31).
+    """
+    if not 1 <= n_laps <= 50:
+        raise ValueError(f"n_laps must be in [1, 50], got {n_laps}")
+    if calibration is None:
+        calibration = TyreCalibration()
+    calibration = calibration.clamped()
+    if compound is None:
+        compound = car.default_compound
+
+    state = TyreState.from_setup(setup)
+    history = [state.copy()]
+    lap_times: list[float] = []
+    per_lap_results: list[SimResult] = []
+    per_point_states: list = []
+
+    # Back-compat fast path: n_laps == 2 + uncalibrated + default-compound -> v1.2.1 two-lap.
+    use_back_compat = (
+        n_laps == 2
+        and not calibration.measured
+        and compound.index == car.default_compound_index
+    )
+    if use_back_compat:
+        result = simulate(car, track, driver, ds=ds, two_lap=True)
+        # Synthesize lap_times from result's lap1/lap2 fields.
+        lap_times = [float(result.lap1_time), float(result.lap2_time)]
+        # State stays constant (no evolution): record same state twice.
+        history.append(state.copy())
+        history.append(state.copy())
+        per_lap_results = [result, result]
+        # Constant-state per-point arrays for telemetry emission.
+        n_each = int(np.sum(result.lap_id == 1)) if result.lap_id is not None else len(result.distances)
+        n_total = len(result.distances)
+        for n_pts in (n_each, n_total - n_each if n_total > n_each else 0):
+            if n_pts <= 0:
+                continue
+            per_point_states.append(_constant_state_arrays(state, n_pts))
+        return StintResult(
+            n_laps=2,
+            setup=setup,
+            calibration=calibration,
+            lap_times_s=lap_times,
+            tyre_state_history=history,
+            per_lap_sim_results=per_lap_results,
+            per_point_states=per_point_states,
+            compound=compound,
+        )
+
+    # Build car-level tyre model once (LUTs cached at module level).
+    tyre_model = build_car_tyre_model(car, compound)
+
+    # Pre-compute the signed-radius array on the simulator's grid so we don't
+    # rebuild it every lap. `to_points(ds)` returns absolute radii on a uniform
+    # grid; we re-derive signs from track.csv_data's (x, y).
+    distances_grid, radii_grid = track.to_points(ds)
+    if getattr(track, "is_csv_backed", False):
+        radius_signs = derive_radius_sign(distances_grid, track.csv_data)
+    else:
+        radius_signs = np.zeros(len(distances_grid), dtype=int)
+
+    for _lap_idx in range(1, n_laps + 1):
+        # Scale the car by current state's grip envelope. Active compound's
+        # dy0/dx0 baseline is swapped in via GripScaledCar(compound=...).
+        # v1.3 (spec §21.3): `combined_grip_envelope` returns a 3-tuple; the
+        # third value (`drag_scale`) is threaded into the 3-pass solver via
+        # `simulate(..., drag_scale=...)` and multiplies the total drag force
+        # (aero + rolling resistance) for this lap. Wrap `car` with
+        # `_DragScaledCar` at the INNERMOST layer here so `GripScaledCar`'s
+        # internal `self._car.drag_force` reads through the scaler.
+        mu_x, mu_y, drag_scale = combined_grip_envelope(state, tyre_model)
+        if drag_scale != 1.0:
+            inner_car = _DragScaledCar(car, drag_scale)
+        else:
+            inner_car = car
+        scaled_car = GripScaledCar(inner_car, mu_x, mu_y, compound=compound)
+
+        # Run a single-lap solver pass. Passing `drag_scale=1.0` to `simulate`
+        # avoids double-wrapping; the inner wrapper above already applied it.
+        lap_result = simulate(
+            scaled_car, track, driver, ds=ds, two_lap=False,
+            drag_scale=1.0,
+        )
+        per_lap_results.append(lap_result)
+        lap_times.append(float(lap_result.lap_time))
+
+        # Walk per-point arrays and update state in place. Snapshot per-point.
+        n_pts = len(lap_result.distances)
+        point_states = _allocate_per_point_state_arrays(n_pts)
+
+        def _snap(i, st, _arrs=point_states):
+            for w in ("FL", "FR", "RL", "RR"):
+                _arrs["temp_C"][w][i] = st.temp_C[w]
+                _arrs["wear_pct"][w][i] = st.wear_pct[w]
+                _arrs["pressure_psi"][w][i] = st.pressure_psi[w]
+
+        update_segments_in_place(
+            state, car, calibration, tyre_model,
+            distances=lap_result.distances,
+            speeds=lap_result.speeds,
+            radii=radii_grid[: len(lap_result.distances)],
+            radius_signs=radius_signs[: len(lap_result.distances)],
+            labels=lap_result.limit_label,
+            on_segment=_snap,
+        )
+        per_point_states.append(point_states)
+        history.append(state.copy())
+
+    return StintResult(
+        n_laps=n_laps,
+        setup=setup,
+        calibration=calibration,
+        lap_times_s=lap_times,
+        tyre_state_history=history,
+        per_lap_sim_results=per_lap_results,
+        per_point_states=per_point_states,
+        compound=compound,
+    )
+
+
+def _allocate_per_point_state_arrays(n: int) -> dict:
+    return {
+        "temp_C": {w: np.zeros(n) for w in ("FL", "FR", "RL", "RR")},
+        "wear_pct": {w: np.zeros(n) for w in ("FL", "FR", "RL", "RR")},
+        "pressure_psi": {w: np.zeros(n) for w in ("FL", "FR", "RL", "RR")},
+    }
+
+
+def _constant_state_arrays(state, n: int) -> dict:
+    out = _allocate_per_point_state_arrays(n)
+    for w in ("FL", "FR", "RL", "RR"):
+        out["temp_C"][w][:] = state.temp_C[w]
+        out["wear_pct"][w][:] = state.wear_pct[w]
+        out["pressure_psi"][w][:] = state.pressure_psi[w]
+    return out

@@ -21,6 +21,21 @@ OPTIONAL_INT_COLUMNS = ("lap",)
 # Known opportunistic float passthroughs. Anything else that parses as float
 # also passes through (see `read_ac_log`).
 OPTIONAL_FLOAT_COLUMNS = ("steerAngle",)
+# v2 (spec §21.11): string passthroughs (compound name varies across loggers).
+OPTIONAL_STRING_COLUMNS = ("tyreCompound",)
+# v2 per-wheel state channels (spec §21.6). Opportunistic; if any required
+# state channel is missing, callers warn-once-per-file and continue with
+# `tyre_calibration.measured = false`.
+PER_WHEEL_STATE_CHANNELS = (
+    "tyreTempFL", "tyreTempFR", "tyreTempRL", "tyreTempRR",
+    "tyreWearFL", "tyreWearFR", "tyreWearRL", "tyreWearRR",
+    "wheelsPressureFL", "wheelsPressureFR", "wheelsPressureRL", "wheelsPressureRR",
+)
+
+
+def has_per_wheel_state(telem: dict) -> bool:
+    """Return True iff the telem dict carries all 12 per-wheel state channels."""
+    return all(col in telem for col in PER_WHEEL_STATE_CHANNELS)
 
 
 def read_ac_log(path):
@@ -51,10 +66,15 @@ def read_ac_log(path):
     for col in OPTIONAL_INT_COLUMNS:
         if col in fieldnames:
             out[col] = np.array([int(float(r[col])) for r in rows], dtype=int)
+    # v2 (§21.11): string passthroughs (tyreCompound varies in format).
+    for col in OPTIONAL_STRING_COLUMNS:
+        if col in fieldnames:
+            out[col] = np.array([str(r.get(col, "")) for r in rows], dtype=object)
     # Float passthroughs: known opportunistic columns first, then any other
     # CSV column that parses as a float. Non-numeric extras are silently
     # ignored (warnings live at the CLI layer).
-    handled = set(REQUIRED_COLUMNS) | set(OPTIONAL_INT_COLUMNS)
+    handled = (set(REQUIRED_COLUMNS) | set(OPTIONAL_INT_COLUMNS)
+               | set(OPTIONAL_STRING_COLUMNS))
     for col in fieldnames:
         if col in handled:
             continue

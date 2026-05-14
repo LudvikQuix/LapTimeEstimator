@@ -5,8 +5,9 @@ driven by a per-driver JSON (skill + consistency + input-shape parameters).
 
 v1.1: drivers ship as JSON (no YAML), and every `lap.py` run simulates two
 laps by default (lap 1 standing, lap 2 flying). Emitted gas/brake traces
-include a trail-brake taper, throttle ramp, and a 1st-order driver-lag
-low-pass so the synthetic telemetry looks human-plausible.
+include a trail-brake taper and a throttle ramp so the synthetic telemetry
+captures corner-entry and corner-exit shaping (v1.2.1 removed the previous
+1st-order driver-lag low-pass; see spec §14.3).
 
 v1.2: `fit_driver.py` measures `driver_tau_s` / `trail_brake_m` /
 `throttle_ramp_m` (plus statistic-only `pedal_press_rate_per_s` and
@@ -217,8 +218,11 @@ Field semantics:
 - `skill_pct` (required, float in (0, 1]) -- multiplier on tyre grip.
 - `consistency_sigma` (optional, default 0.0) -- seconds; >0 triggers a 20-run
   Monte-Carlo on **lap 2 only**. Lap 1 (standing start) is always deterministic.
-- `driver_tau_s` (optional, default 0.12) -- seconds; 1st-order low-pass time
-  constant applied to gas/brake on the synthetic telemetry. `0` disables.
+- `driver_tau_s` (optional, default 0.12) -- seconds; retained as a measured
+  driver statistic (median time-to-50 % on pedal leading edges, see
+  `profile_dynamics.py`). **Not consumed by the v1.2.1 simulator** -- the
+  prior IIR low-pass that consumed it was removed (spec §14.3 / Decisions
+  item 22). The field still loads from JSON for back-compat.
 - `trail_brake_m` (optional, default 30.0) -- metres; linear taper of `brake`
   from 1.0 to 0.0 over the last `trail_brake_m` of every braking-bound region
   immediately before a corner. `0` disables.
@@ -273,7 +277,7 @@ LapTimeEstimator/
 │   ├── driver_fit.py
 │   ├── simulator.py             # two-lap tiled sim
 │   ├── telemetry.py             # AC log parser (+ optional `lap` column)
-│   ├── sim_telemetry.py         # 3-layer pipeline: limit-label -> heuristic -> low-pass
+│   ├── sim_telemetry.py         # 2-layer pipeline: limit-label -> heuristic (v1.2.1)
 │   ├── report.py                # trace CSV + plot
 │   └── validate.py              # real vs sim lap 2
 ├── prep/                        # AC-content preparation

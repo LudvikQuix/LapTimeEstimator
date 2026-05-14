@@ -99,6 +99,64 @@ def write_comparison_plot(result, track_name, driver_name, output_path,
     )
 
 
+def write_stint_summary_csv(stint, output_path: str) -> None:
+    """Per-lap stint summary (spec §7.11): one row per lap with end-of-lap state.
+
+    Columns:
+      lap, lap_time_s,
+      tempFL_C, tempFR_C, tempRL_C, tempRR_C,
+      wearFL_pct, wearFR_pct, wearRL_pct, wearRR_pct,
+      pressureFL_psi, pressureFR_psi, pressureRL_psi, pressureRR_psi
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "lap", "lap_time_s",
+            "tempFL_C", "tempFR_C", "tempRL_C", "tempRR_C",
+            "wearFL_pct", "wearFR_pct", "wearRL_pct", "wearRR_pct",
+            "pressureFL_psi", "pressureFR_psi", "pressureRL_psi", "pressureRR_psi",
+        ])
+        for k in range(stint.n_laps):
+            end_state = stint.tyre_state_history[k + 1]
+            lap_time = stint.lap_times_s[k]
+            w.writerow([
+                k + 1, f"{lap_time:.3f}",
+                f"{end_state.temp_C['FL']:.2f}", f"{end_state.temp_C['FR']:.2f}",
+                f"{end_state.temp_C['RL']:.2f}", f"{end_state.temp_C['RR']:.2f}",
+                f"{end_state.wear_pct['FL']:.3f}", f"{end_state.wear_pct['FR']:.3f}",
+                f"{end_state.wear_pct['RL']:.3f}", f"{end_state.wear_pct['RR']:.3f}",
+                f"{end_state.pressure_psi['FL']:.3f}", f"{end_state.pressure_psi['FR']:.3f}",
+                f"{end_state.pressure_psi['RL']:.3f}", f"{end_state.pressure_psi['RR']:.3f}",
+            ])
+
+
+def print_per_lap_block(stint, *, file=None) -> None:
+    """Per-lap stdout block (spec §11.33).
+
+    Format per line:
+      Lap N: M:SS.sss | wear FL=..% FR=..% RL=..% RR=..% | temp avg ..°C | pressure avg .. psi
+    """
+    import sys
+    out = file if file is not None else sys.stdout
+    for k in range(stint.n_laps):
+        lap_time = stint.lap_times_s[k]
+        m = int(lap_time // 60)
+        s = lap_time - m * 60
+        t_str = f"{m}:{s:06.3f}"
+        end = stint.tyre_state_history[k + 1]
+        temps = list(end.temp_C.values())
+        press = list(end.pressure_psi.values())
+        print(
+            f"Lap {k + 1}: {t_str} | "
+            f"wear FL={end.wear_pct['FL']:.0f}% FR={end.wear_pct['FR']:.0f}% "
+            f"RL={end.wear_pct['RL']:.0f}% RR={end.wear_pct['RR']:.0f}% | "
+            f"temp avg {sum(temps) / 4:.0f}°C | "
+            f"pressure avg {sum(press) / 4:.1f} psi",
+            file=out,
+        )
+
+
 def build_output_stem(track_path_or_name, driver_name, *, is_csv_track):
     """Compute the file-stem prefix used for sim outputs.
 

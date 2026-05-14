@@ -1,17 +1,20 @@
 """Driver model: skill multiplier + consistency noise + v1.1 input-shape fields.
 
 v1 fields (`skill_pct`, `consistency_sigma`) drive grip scaling and Monte-Carlo
-noise. v1.1 adds three sim-telemetry-only shape fields consumed by
+noise. v1.1 adds sim-telemetry-only shape fields consumed by
 `sim_telemetry.py` (not the grip-scaling path):
-  - `driver_tau_s`    -- 1st-order low-pass time constant on gas/brake.
   - `trail_brake_m`   -- linear brake-taper distance on corner entry.
   - `throttle_ramp_m` -- linear throttle-ramp distance on corner exit.
 
+`driver_tau_s` is retained on the dataclass for back-compat and as a measured
+statistic (see `profile_dynamics.py`) but is **not consumed** by the v1.2.1
+simulator -- the IIR low-pass it parameterised was removed per spec §14.3.
+
 v1.2 adds the `profile.dynamic` block; when present, the measured values
-override the top-level fields for the three sim-consumed fields. The two
-statistics-only fields (`pedal_press_rate_per_s`,
+override the top-level fields for the sim-consumed fields. The statistics-only
+fields (`driver_tau_s`, `pedal_press_rate_per_s`,
 `steering_aggression_deg_per_s`) are also loaded onto the dataclass but the
-v1.2 simulator does not consume them.
+v1.2.1 simulator does not consume them.
 
 Format: JSON only. No YAML fallback (v1.1 clean break -- see spec §6.2).
 """
@@ -35,12 +38,26 @@ class Driver:
     name: str
     skill_pct: float
     consistency_sigma: float = 0.0
+    # `driver_tau_s` is retained as a measured statistic but is NOT consumed by
+    # the v1.2.1 simulator (the IIR low-pass was removed per spec §14.3).
     driver_tau_s: float = DEFAULT_DRIVER_TAU_S
     trail_brake_m: float = DEFAULT_TRAIL_BRAKE_M
     throttle_ramp_m: float = DEFAULT_THROTTLE_RAMP_M
     # v1.2 statistics-only fields. Not wired into the simulator yet.
     pedal_press_rate_per_s: float | None = None
     steering_aggression_deg_per_s: float | None = None
+    # v2: tyre calibration block (spec §7.2). Defaults injected when absent.
+    tyre_calibration: dict = field(default_factory=lambda: {
+        "k_friction": 1.0, "h": 50.0, "C_thermal": 5000.0,
+        "k_wear": 1.0e-7, "measured": False,
+        "source": {
+            "telemetry_csvs": [],
+            "fit_rmse_temp_C": None,
+            "fit_rmse_wear_pct": None,
+            "fit_rmse_pressure_psi": None,
+            "fitted_at": None,
+        },
+    })
     source: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
 
@@ -87,6 +104,7 @@ class Driver:
 
         name = raw.get("name") or os.path.splitext(os.path.basename(path))[0]
         source = raw.get("source") or {}
+        tyre_cal = _load_tyre_calibration(raw)
         return cls(
             name=str(name),
             skill_pct=skill,
@@ -96,8 +114,25 @@ class Driver:
             throttle_ramp_m=ramp,
             pedal_press_rate_per_s=press_rate,
             steering_aggression_deg_per_s=steer_aggr,
+            tyre_calibration=tyre_cal,
             source=source if isinstance(source, dict) else {},
             raw=raw,
+        )
+
+    def get_tyre_calibration(self):
+        """Return a `tyre_state.TyreCalibration` derived from this driver's block.
+
+        Local import to avoid a circular dependency at module-import time.
+        """
+        from .tyre_state import TyreCalibration
+        tc = self.tyre_calibration or {}
+        return TyreCalibration(
+            k_friction=float(tc.get("k_friction", 1.0)),
+            h=float(tc.get("h", 50.0)),
+            C_thermal=float(tc.get("C_thermal", 5000.0)),
+            k_wear=float(tc.get("k_wear", 1.0e-7)),
+            measured=bool(tc.get("measured", False)),
+            source=tc.get("source") if isinstance(tc.get("source"), dict) else {},
         )
 
     @property
@@ -152,6 +187,39 @@ def _resolve_field(
             f"Driver JSON {path}: {key} must be >= {min_value}, got {value}"
         )
     return value
+
+
+def _load_tyre_calibration(raw: dict) -> dict:
+    """Build the v2 tyre_calibration block onto the Driver dataclass.
+
+    Defaults (spec §7.2):
+      k_friction=1.0, h=50.0, C_thermal=5000.0, k_wear=1.0e-7, measured=False.
+    Absent block -> defaults with measured=False. Partial block -> per-field
+    defaulting for missing keys.
+    """
+    block = raw.get("tyre_calibration") or {}
+    if not isinstance(block, dict):
+        block = {}
+    defaults = {
+        "k_friction": 1.0,
+        "h": 50.0,
+        "C_thermal": 5000.0,
+        "k_wear": 1.0e-7,
+        "measured": False,
+        "source": {
+            "telemetry_csvs": [],
+            "fit_rmse_temp_C": None,
+            "fit_rmse_wear_pct": None,
+            "fit_rmse_pressure_psi": None,
+            "fitted_at": None,
+        },
+    }
+    out = dict(defaults)
+    for k, v in block.items():
+        out[k] = v
+    # Force bool on `measured`.
+    out["measured"] = bool(out.get("measured", False))
+    return out
 
 
 def _resolve_optional(dynamic: dict, key: str) -> float | None:

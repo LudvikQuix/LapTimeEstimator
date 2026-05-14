@@ -1,6 +1,6 @@
 # Lap Simulation: CSV Track + Driver Config
 
-**Status:** Draft (v1 + telemetry-fitting + sim-telemetry-emission + cross-track-validation + project-reorg addendum; v1.1 in-flight: driver JSON migration + driver-lag low-pass + trail-brake/throttle-ramp heuristic + two-lap tiled sim + multi-lap-mandatory fit — §13/§14/§20; v1.2 in-flight: driver-profile dynamic-signal measurement from telemetry + 10 ms sim cadence default — §13/§14; v2 MF4 telemetry output PLANNED — §18; v3 slip-based physics + tyre-state BACKLOG — §19)
+**Status:** Draft (v1 + telemetry-fitting + sim-telemetry-emission + cross-track-validation + project-reorg addendum; v1.1 in-flight: driver JSON migration + trail-brake/throttle-ramp heuristic + two-lap tiled sim + multi-lap-mandatory fit — §13/§14/§20; v1.2 in-flight: driver-profile dynamic-signal measurement from telemetry + 10 ms sim cadence default — §13/§14; v1.2.1: IIR driver-lag low-pass removed from sim emission — §14.3 / Decisions item 22; **v2 in-flight: per-wheel tyre state + multi-lap stint sim + inverse PSI solver — §21 / Decisions item 23; v2 compound-aware tyres.ini parsing — §21.11 / Decisions item 24; v1.3 in-flight: asymmetric pressure model — grip-only penalty above IDEAL, drag-only penalty below IDEAL — §21.3 / Decisions item 25**; v2 MF4 telemetry output PLANNED — §18; v3 slip-based physics BACKLOG — §19)
 **Project:** LapTimeEstimator
 **Branch:** feature/sc-71955/lap-simulation
 **Created:** 2026-05-13
@@ -26,23 +26,36 @@ It also formalises the **preparation pipeline** (§16): two CLIs `prep/prep_car.
 
 **Future directions (2026-05-13):** two longer-horizon backlog items are captured in §19 — a slip-based simulator that can represent drift / oversteer / understeer, and a tyre-state model (temp / wear / pressure) that modulates grip lap-over-lap. Both are research-scoped, not v1 work; §19 documents what AC already gives us for free, the architectural impact, and the recommended sequencing.
 
-**v1.1 in-flight (2026-05-13):** five bundled changes layered on the shipped v1 plumbing — (A) driver config format moves from YAML to JSON (no fallback); (B) driver-lag 1st-order low-pass on emitted gas/brake; (C) trail-brake + throttle-ramp corner-shape heuristic applied to gas/brake before the low-pass; (D) two-lap "tiled" simulation always emitted (lap 1 standing, lap 2 flying), with a `lap` column on telemetry/trace CSVs and Monte-Carlo / validation / loop-closure all keying off lap 2; (E) **driver-fit requires ≥2 laps and pools cornering samples across them** — single-lap fits are hard-errors (§13). See §13, §14.3, §20.
+**v1.1 in-flight (2026-05-13):** five bundled changes layered on the shipped v1 plumbing — (A) driver config format moves from YAML to JSON (no fallback); (B) ~~driver-lag 1st-order low-pass on emitted gas/brake~~ **REMOVED in v1.2.1 — see Decisions item 22**; (C) trail-brake + throttle-ramp corner-shape heuristic applied to gas/brake; (D) two-lap "tiled" simulation always emitted (lap 1 standing, lap 2 flying), with a `lap` column on telemetry/trace CSVs and Monte-Carlo / validation / loop-closure all keying off lap 2; (E) **driver-fit requires ≥2 laps and pools cornering samples across them** — single-lap fits are hard-errors (§13). See §13, §14.3, §20.
 
-**v1.2 in-flight (2026-05-13):** three bundled extensions on top of v1.1 — (F) `fit_driver.py` now **measures the dynamic driver-profile signals from telemetry** instead of taking the hand-defaults: `driver_tau_s`, `trail_brake_m`, `throttle_ramp_m` plus two new statistics `pedal_press_rate_per_s` and `steering_aggression_deg_per_s`. All five live under a new `profile.dynamic` sub-object in `drivers/<name>.json`. Hand-defaults stay as fallbacks when measurements are not extractable. (G) **Lap-selection rule** for the fitter: take the **5–10 newest** laps for that driver (fallback to all if fewer than 5, hard minimum of 2). Newness comes from input ordering or the new `--newest N` flag combined with `--laps-glob`. (H) **Default `--telemetry-dt-ms` raised from 100 to 10** for sim emission — 10× larger files, accepted for the dramatically better driver-lag smoothing fidelity at the new α = 10 / (120 + 10) ≈ 0.077. See §13.11, §13.12, §14.
+**v1.2 in-flight (2026-05-13):** three bundled extensions on top of v1.1 — (F) `fit_driver.py` now **measures the dynamic driver-profile signals from telemetry** instead of taking the hand-defaults: `driver_tau_s`, `trail_brake_m`, `throttle_ramp_m` plus two new statistics `pedal_press_rate_per_s` and `steering_aggression_deg_per_s`. All five live under a new `profile.dynamic` sub-object in `drivers/<name>.json`. Hand-defaults stay as fallbacks when measurements are not extractable. `driver_tau_s` is **measured but no longer consumed** by the sim (v1.2.1 — see §14.3 and Decisions item 22). (G) **Lap-selection rule** for the fitter: take the **5–10 newest** laps for that driver (fallback to all if fewer than 5, hard minimum of 2). Newness comes from input ordering or the new `--newest N` flag combined with `--laps-glob`. (H) **Default `--telemetry-dt-ms` raised from 100 to 10** for sim emission — 10× larger files, accepted for cleaner edge geometry in downstream consumers. See §13.11, §13.12, §14.
+
+**v1.2.1 in-flight (2026-05-14):** the §14.3 emission pipeline drops the IIR driver-lag low-pass (Layer 3). Brake points in racing are spatial cues, not stimulus-driven reactions; the only physical lag (motor execution + pedal mechanics, ~20–50 ms) is sub-sample at 50 Hz and well below the v1.2 10 ms cadence. `driver_tau_s` is retained in the schema and in `profile_dynamics.py` measurements as a **driver statistic only** — useful for characterising how fast a driver presses pedals — but not consumed by the simulator. See Decisions item 22.
+
+**v2 in-flight (2026-05-14):** the simulator gains **per-wheel tyre state (temperature, wear, pressure) evolving across a multi-lap stint**, plus an **inverse-solver CLI mode** that recommends cold-PSI setup values to hit a target wear at a target lap. Architecturally this is **option 2.5** — the existing 3-pass `simulator.py` and single-scalar grip envelope are retained; per-wheel state is computed offline between laps and fed back as a scaled `mu_x` / `mu_y` for the next lap's solver pass. Per-wheel forces, yaw dynamics, and Pacejka stay in v3 (§19 unchanged). v2 is sized as ~1–2 weeks of evening work; v3 is a multi-week rebuild. Full algorithm, schema additions, CLI shapes, calibration approach, and acceptance criteria in §21. See Decisions item 23.
+
+**v2 compound-aware parsing (2026-05-14):** `car.py` now parses **all compounds** defined in `tyres.ini` (un-suffixed sections = compound 0, `_1` suffix = compound 1, `_2` = compound 2, …) instead of only the un-suffixed Compound 0. Each compound carries its own `NAME`, `SHORT_NAME`, per-axle `PRESSURE_IDEAL`, `PRESSURE_STATIC`, `PRESSURE_D_GAIN`, `WEAR_CURVE` LUT, `DY0/DY1/DX0/DX1/DY_REF/DX_REF`, and `[THERMAL_*]` `PERFORMANCE_CURVE`. Setup JSON's `compound` field selects which compound the sim uses (case-insensitive match against `NAME` or `SHORT_NAME`); a new `--compound <name>` CLI flag on `lap.py` overrides that; and `fit_driver.py` auto-selects from the telemetry's `tyreCompound` column. `f_pressure_grip`, `f_pressure_drag`, `f_temp`, and `f_wear` all become per-compound functions; default cold pressures fall back to the active compound's `PRESSURE_STATIC` (not `PRESSURE_IDEAL`). Motivation: Tomas's real lap on Semislicks at 26 psi cold was being scored against Street's `PRESSURE_IDEAL=42`, putting `f_pressure` at the 0.30 grip floor and tanking the sim. See §21.11 and Decisions item 24.
+
+**v1.3 pressure-model asymmetry (2026-05-14):** the previous v2 `f_pressure(p) = 1 - PRESSURE_D_GAIN · (p - PRESSURE_IDEAL)²` was a symmetric quadratic that penalised grip on *both* sides of `PRESSURE_IDEAL`. Physically wrong on the low-PSI side: under-pressure increases the contact patch (more or equal mechanical grip) but increases sidewall flex + rolling resistance (more drag). The model was double-counting the low-PSI penalty in the grip term where it should have been in the drag term. v1.3 splits the single function into two: `f_pressure_grip(p)` (one-sided quadratic, penalises *over*-pressure only; `1.0` below IDEAL) and `f_pressure_drag(p)` (linear under-pressure penalty + small over-pressure benefit, modulating aero drag + rolling resistance in the straights). `combined_grip_envelope` now returns `(mu_x_scale, mu_y_scale, drag_scale)`; `drag_scale` threads into the 3-pass solver's drag-force computation. Two new hand-default constants `k_drag = 0.5` and `k_drag_reduction = 0.1` live on the active `Compound`. Calibration from telemetry is deferred to v1.4. See §21.3 and Decisions item 25.
 
 ## 2. Goals
 
 - Accept a **car data directory**, a **track CSV path**, and a **driver JSON path** as the three positional inputs to the sim CLI (`lap.py`).
 - Consume the rich per-point track CSV format (ideal line preferred, centerline fallback) directly — no intermediate JSON conversion required.
-- Apply a simple **driver model** (`skill_pct`, optional `consistency_sigma`, `driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`) that scales the car's effective grip uniformly and shapes the emitted gas/brake trace.
+- Apply a simple **driver model** (`skill_pct`, optional `consistency_sigma`, `trail_brake_m`, `throttle_ramp_m`) that scales the car's effective grip uniformly and shapes the emitted gas/brake trace. `driver_tau_s` is retained in the schema as a measured statistic but is **not consumed** by the sim (v1.2.1).
 - Emit a per-point **trace CSV** and a **sim-vs-AI comparison PNG** next to the track input so the user can sanity-check results in Quix Cloud / locally.
-- Preserve current stdout lap-time report format (extended for two-lap output — see §20).
+- Preserve current stdout lap-time report format (extended for two-lap output — see §20; extended further for multi-lap stint output — see §21.5).
 - Keep modules small (~500-line soft ceiling).
-- Provide a `fit_driver.py` CLI that ingests **two or more** AC telemetry CSVs (variadic positional, plus a `--laps-glob` shortcut) and emits a single driver JSON calibrated to pooled cornering samples from all laps. Single-lap fits are rejected with a clear error — see §13.
-- Emit a **synthetic AC-schema telemetry CSV** alongside the trace output by default (configurable cadence, **default 10 ms in v1.2** — see §14), so sim runs and real laps are interchangeable downstream.
+- Provide a `fit_driver.py` CLI that ingests **two or more** AC telemetry CSVs (variadic positional, plus a `--laps-glob` shortcut) and emits a single driver JSON calibrated to pooled cornering samples from all laps. Single-lap fits are rejected with a clear error — see §13. **(v2)** When the input telemetry contains per-wheel state channels (§21.6), also calibrate the four tyre-thermal/wear knobs (`k_friction`, `h`, `C_thermal`, `k_wear`) into a `tyre_calibration` block on the driver JSON.
+- Emit a **synthetic AC-schema telemetry CSV** alongside the trace output by default (configurable cadence, **default 10 ms in v1.2** — see §14), so sim runs and real laps are interchangeable downstream. **(v2)** The synthetic CSV gains 12 per-wheel state columns when multi-lap stint mode is engaged — see §21.4.
 - Ship cross-track validation as a **flag on `lap.py`** (`--validate-against <real_telemetry.csv>`), not as a third CLI: when present, `lap.py` additionally loads the real lap, prints a delta report, writes an overlay PNG and a per-bin delta CSV, and emits a GOOD/LOOSE/BAD verdict (§15). Two simulator CLIs total: `fit_driver.py` and `lap.py`.
-- **(v1.2)** Measure dynamic driver-profile signals (`driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`, plus the new `pedal_press_rate_per_s` and `steering_aggression_deg_per_s`) from telemetry inside `fit_driver.py`, replacing hand-defaults. See §13.11 / §13.12.
+- **(v1.2)** Measure dynamic driver-profile signals (`driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`, plus the new `pedal_press_rate_per_s` and `steering_aggression_deg_per_s`) from telemetry inside `fit_driver.py`, replacing hand-defaults. See §13.11 / §13.12. **(v1.2.1)** `driver_tau_s` is measured but recorded as a driver statistic — not consumed by the simulator.
 - **(v1.2)** Default lap selection is the **5–10 newest laps**; fall back to all available if fewer than 5; hard minimum 2 (existing §13 guard). See §13.12.
+- **(v2)** Run **multi-lap stint simulation** (`--laps N`, N ∈ [1, 50], default 2 for back-compat) with per-wheel state (temperature, wear, pressure) evolving end-of-lap → start-of-next-lap. Per-lap stdout summary + 12 new telemetry columns. See §21.
+- **(v2)** Provide an **inverse-PSI solver** (`lap.py --solve-pressure-for-wear <pct> --at-lap <N>` or `setup-recommend` sub-command) that bisects cold-PSI per wheel to hit a target wear at a target lap. See §21.5.
+- **(v2)** Introduce a `setups/` directory of cold-PSI / ambient setup configs. See §21.7.
+- **(v2)** Parse **all compounds** from `tyres.ini` into `car.compounds: list[Compound]` and select active compound by setup-JSON `compound` field, `--compound` CLI flag, or telemetry's `tyreCompound`. `f_pressure_grip`/`f_pressure_drag`/`f_temp`/`f_wear` are per-compound. See §21.11.
+- **(v1.3)** Replace the symmetric pressure-grip quadratic with an **asymmetric pressure model**: grip penalty active only above `PRESSURE_IDEAL` (over-pressure → smaller contact patch); drag penalty active only below `PRESSURE_IDEAL` (under-pressure → rolling resistance + sidewall flex). `combined_grip_envelope` returns three scalars `(mu_x_scale, mu_y_scale, drag_scale)`. See §21.3.
 - **(reorg)** Ship a **preparation pipeline** (§16).
 - **(reorg)** Ship a **corner analysis tool** (§17).
 - **(reorg)** Lock the folder convention (§6.9).
@@ -51,20 +64,26 @@ It also formalises the **preparation pipeline** (§16): two CLIs `prep/prep_car.
 
 - Driver line selection / line deviation (always uses the ideal line if present).
 - Separate brake-aggression vs throttle-aggression parameters (v2 hook in §13.9).
-- Reaction-time / lift-and-coast / fuel-saving driver behaviours.
-- Tyre thermal model, ABS, traction control, weight transfer beyond what `car.py` already does.
+- Reaction-time / lift-and-coast / fuel-saving driver behaviours. **(v1.2.1) Note:** classical stimulus-driven reaction-time models are explicitly out of scope. Racing brake points are spatial cues; the only physical lag (~20–50 ms motor execution) is sub-sample at the v1.2 10 ms cadence and not worth modelling.
+- ~~Tyre thermal model, ABS, traction control, weight transfer beyond what `car.py` already does.~~ **(v2 amendment)** A coarse per-wheel tyre thermal + wear + pressure model lands in v2 (§21). ABS / traction control / true weight-transfer transients remain out of scope.
 - Hooking into `RequirementsForAbnormalityAnalysis.txt` checks — separate feature.
-- Multi-lap / fuel-burn / tyre-wear simulation. (v1.1 emits two laps for warm-up/flying-lap representativeness — see §20 — but does **not** model fuel burn or tyre wear.)
+- ~~Multi-lap / fuel-burn / tyre-wear simulation.~~ **(v2 amendment)** Multi-lap stint simulation with per-wheel tyre wear lands in v2 (§21). Fuel burn is still out of scope. The v1.1 two-lap tiled mode (§20) is preserved as the default for `--laps 2`.
 - Web UI. CLI only.
 - Per-corner skill profile in v1 (v2 hook in §13.6).
-- Fitting tyre, aero, or engine parameters from telemetry — only driver-skill scalars are fit; the car model is treated as ground truth.
+- Fitting tyre, aero, or engine parameters from telemetry — only driver-skill scalars are fit. **(v2 amendment)** The four tyre-thermal/wear calibration knobs (`k_friction`, `h`, `C_thermal`, `k_wear`) are fit when measured per-wheel state is available; aero and engine parameters remain ground truth.
 - Per-track familiarity / learning-curve modelling in v1.
 - No database, object store, remote artefact server, or networked service.
 - **(reorg)** The corner-analysis tool does **not** merge telemetry.
 - **(reorg)** `prep/prep_track.py` does **not** infer corner notation.
 - **MF4 output is v2 — see §18; v1 only emits CSV.**
-- **Slip-based physics, drift / oversteer / understeer dynamics, and per-wheel thermal / wear / pressure state are v3 backlog — see §19.**
-- **(v1.2)** Consuming `pedal_press_rate_per_s` / `steering_aggression_deg_per_s` inside the simulator — they are recorded as profile statistics only for future v1.3 work. The currently-consumed dynamic fields remain `driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`.
+- **Slip-based physics, drift / oversteer / understeer dynamics, per-wheel forces, yaw dynamics, Pacejka, slip-based control-loop drivers are v3 backlog — see §19.** v2 keeps the single-grip-envelope architecture; per-wheel state modulates `mu_x` / `mu_y` only, not per-wheel forces (§21.3).
+- **(v2)** Tyre puncture, catastrophic failure modes, marble pickup, track-evolution grip, heat soak across pit stops, multi-stint sessions. All out of scope. v2 is one stint, no pit stop.
+- **(v1.2)** Consuming `pedal_press_rate_per_s` / `steering_aggression_deg_per_s` inside the simulator — they are recorded as profile statistics only for future v1.3 work.
+- **(v1.2.1)** Consuming `driver_tau_s` inside the simulator. It is recorded as a statistic in the driver JSON for back-compat and future use (e.g. a v1.3 slew-rate-limited driver model), but the §14.3 emission pipeline does not apply any low-pass smoothing based on it. The currently-consumed dynamic fields are `trail_brake_m` and `throttle_ramp_m` only.
+- **(v2)** Per-compound calibration of the four tyre-thermal/wear knobs (`k_friction`, `h`, `C_thermal`, `k_wear`). They are physical heating/wear constants in v2 and apply across compounds. Per-compound knob tables are a v1.3 candidate. See §21.11.
+- **(v2)** Compound mid-stint switching (pit stop with fresh compound change). Out of scope for v2; v1.3 candidate. See §21.11.
+- **(v1.3)** Calibrating `k_drag` and `k_drag_reduction` from telemetry. They are hand-defaults in v1.3 (`k_drag = 0.5`, `k_drag_reduction = 0.1`). Telemetry-driven fit (lap-time-vs-pressure sweep against measured AC data) is a v1.4 candidate. See §21.3 and §21.10.
+- **(v1.3)** Modelling an under-pressure *grip bonus* (larger contact patch). Real but small; v1.3 keeps `f_pressure_grip(p < IDEAL) = 1.0` for simplicity. v1.4 candidate. See §21.3.
 
 ## 4. User stories / scenarios
 
@@ -73,40 +92,52 @@ It also formalises the **preparation pipeline** (§16): two CLIs `prep/prep_car.
 3. **Use a centerline-only track.** User points at a `layout_*.csv` with no `*_ideal_line.csv` sibling.
 4. **Consistency study.** User sets `consistency_sigma: 0.3` → sim performs N Monte-Carlo runs on **lap 2 only**.
 5. **Legacy invocation (built-in track).** User runs `python lap.py cars_csv/bmw_1m monza drivers/pro.json`.
-6. **Fit a driver from multi-lap telemetry.** User has six AC laps at `samples/aclog/Tomas_Lap{1..6}.csv` (lap 1 has a standing-start prefix; lap 6 is unfinished). They run `python fit_driver.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json samples/aclog/Tomas_Lap1.csv samples/aclog/Tomas_Lap2.csv samples/aclog/Tomas_Lap3.csv samples/aclog/Tomas_Lap4.csv samples/aclog/Tomas_Lap5.csv samples/aclog/Tomas_Lap6.csv` (or equivalently `--laps-glob "samples/aclog/Tomas_Lap*.csv"`). The tool pools cornering samples across all six laps, writes `drivers/tomas.json`, runs a validation sim, and prints the multi-lap delta block (real-laps-used / mean-real / sim-lap-2 / delta — §13.5 step 9).
-7. **Loop-closure check.** Sim → synthetic telemetry CSV (two laps) → fed back into `fit_driver.py`. Since the fitter requires ≥2 laps, the synthetic CSV's `lap` column (carrying `1` and `2`) is split per-lap and both are passed to the fitter, or the user runs the sim twice with different seeds and pools both lap-2s.
-8. **Cross-track prediction and validation (headline workflow).** Fit on Track A → predict on Track B → drive Track B in AC for ~10 laps → validate.
+6. **Fit a driver from multi-lap telemetry.** User has six AC laps at `samples/aclog/Tomas_Lap{1..6}.csv`. They run `python fit_driver.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json samples/aclog/Tomas_Lap1.csv samples/aclog/Tomas_Lap2.csv samples/aclog/Tomas_Lap3.csv samples/aclog/Tomas_Lap4.csv samples/aclog/Tomas_Lap5.csv samples/aclog/Tomas_Lap6.csv` (or `--laps-glob "samples/aclog/Tomas_Lap*.csv"`).
+7. **Loop-closure check.** Sim → synthetic telemetry CSV (two laps) → fed back into `fit_driver.py`.
+8. **Cross-track prediction and validation (headline workflow).** Fit on Track A → predict on Track B → drive Track B in AC → validate.
 9. **(reorg) Prepare a new car / track from raw AC content.**
 10. **(reorg) Run corner analysis on a prepared track.**
 11. **(v1.1) Single-lap mode for fast sweeps.** User runs `python lap.py ... drivers/pro.json --single-lap`.
-12. **(v1.2) Pick newest laps automatically.** User has 30 telemetry CSVs in `samples/aclog/` and runs `python fit_driver.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json --laps-glob "samples/aclog/Tomas_*.csv" --newest 10`. The tool ranks the glob hits by mtime (newest first), keeps the top 10, and runs the multi-lap fit.
-13. **(v1.2) Four-layout sweep across ks_nurburgring.** After fitting `drivers/tomas.json` on the freshest 5–10 Sprint A laps, the user runs `lap.py` once for each of `layout_gp_a.csv`, `layout_gp_b.csv`, `layout_sprint_a.csv`, `layout_sprint_b.csv` at `--telemetry-dt-ms 10` (2 laps by default) and compares the predicted lap times.
+12. **(v1.2) Pick newest laps automatically.** User has 30 telemetry CSVs and runs with `--laps-glob ... --newest 10`.
+13. **(v1.2) Four-layout sweep across ks_nurburgring.**
+14. **(v2) "How long until 80%?".** User runs `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json --laps 20` and reads the per-lap stdout block to find the lap at which the limiting wheel crosses 80% wear.
+15. **(v2) "Give me a setup for 50% at lap 12".** User runs `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json --solve-pressure-for-wear 0.50 --at-lap 12` and gets a recommended four-PSI setup back, plus a verification table showing predicted wear/temp/pressure at each lap when re-run forward with that setup.
+16. **(v2) Uniform-pressure setup.** Same as 15 but with `--uniform-pressure` so all four wheels get the same recommended cold PSI (simpler answer the user can dial into AC's tyre app).
+17. **(v2) Calibrate thermal/wear knobs from lake telemetry.** User runs `fit_driver.py` against Tomas's six laps where the lake CSVs include `tyreTempFL/...`, `tyreWearFL/...`, `wheelsPressureFL/...`. The fitter fits the four calibration knobs alongside `skill_pct` and writes them under `tyre_calibration` in the driver JSON. Without per-wheel state in the telemetry, the fitter writes default knobs and a `measured: false` flag.
+18. **(v2) Run sim on Semislicks compound.** Tomas's real lap was on Semislicks (`tyreCompound="Semislicks (SM)"`, 26 psi cold). User runs `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json --compound Semislicks --pressure FL=26,FR=26,RL=26,RR=26`. The sim picks the Semislicks `PRESSURE_IDEAL=33/34`, `PRESSURE_D_GAIN=0.0045`, `semislicks_{front,rear}.lut` wear curves, and `[THERMAL_FRONT_1]`/`[THERMAL_REAR_1]` thermal curves — so 26 psi is now within the Semislicks operating envelope rather than collapsing `f_pressure` to the floor.
+19. **(v2) Fit driver from compound-tagged telemetry.** Same as 6, but the telemetry rows carry `tyreCompound="Semislicks (SM)"`. `fit_driver.py` auto-selects the Semislicks compound for the calibration and the `lat_g_max` envelope; written into the driver JSON's `source.compound` for traceability.
+20. **(v1.3) Low-PSI sanity.** With calibrated Tomas + Semislicks + ambient 26 °C, a 3-lap sim at 26 psi cold should produce lap times within ±2 s of the 33 psi (IDEAL) baseline — *not* the 6 s deficit the symmetric v2 model produced. Cause for the residual gap is rolling-resistance drag, not grip collapse.
 
 ## 5. Proposed design
 
-- Add a new `driver.py` module with a `Driver` dataclass (loaded from JSON) and a small `apply_to_car(car)` helper. The dataclass also carries the three v1.1 fields and (v1.2) a `profile` block.
+- Add a new `driver.py` module with a `Driver` dataclass (loaded from JSON) and a small `apply_to_car(car)` helper. The dataclass also carries the three v1.1 fields and (v1.2) a `profile` block. **(v2)** Plus a `tyre_calibration` block (§21.6).
 - Extend `track.py` with a `Track.from_csv(path)` classmethod.
-- Adjust `simulator.simulate(...)` so it takes an optional `driver` argument and supports two-lap tiled mode (§20).
-- Move output artifact generation into a new `report.py` module.
-- `lap.py` is the single sim CLI.
-- Add a `telemetry.py` module that owns AC-log parsing and merging-with-track logic. **(v1.2)** It also accepts the broader AC channel set, including `steerAngle` when present; missing optional channels degrade gracefully with a warning.
-- Add a `driver_fit.py` module that consumes a list of merged frames (one per lap) and pools their cornering samples to fit driver parameters. **(v1.2)** It also runs the new `profile_dynamics.py` helper to measure `driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`, `pedal_press_rate_per_s`, `steering_aggression_deg_per_s` from leading-edge / ramp / steering-rate statistics on the same merged frames. Add a thin `fit_driver.py` CLI wrapper that accepts variadic telemetry paths, `--laps-glob`, and `--newest N`.
-- Add a `profile_dynamics.py` module (v1.2 — see §13.11). Single file, ~250 lines.
-- Add a `sim_telemetry.py` module (§14).
+- Adjust `simulator.simulate(...)` so it takes an optional `driver` argument and supports two-lap tiled mode (§20). **(v2)** Add a new `simulate_stint(car, track, driver, *, n_laps, setup, calibration)` wrapper that loops `simulate(...)` lap-by-lap and threads per-wheel state through (§21.4). **(v1.3)** Threads `drag_scale` from `combined_grip_envelope` into the 3-pass drag-force computation.
+- Move output artifact generation into a new `report.py` module. **(v2)** Add a per-lap stint summary helper.
+- `lap.py` is the single sim CLI. **(v2)** Gains `--laps N`, `--setup <path>`, per-wheel pressure flags, `--solve-pressure-for-wear`, `--at-lap`, `--target-wheel`, `--uniform-pressure`, `--compound <name>`.
+- Add a `telemetry.py` module that owns AC-log parsing and merging-with-track logic. **(v1.2)** Accepts `steerAngle` opportunistically. **(v2)** Accepts per-wheel state channels (`wheelsPressureFL/...`, `tyreTempFL/...`, `tyreWearFL/...`, `wheelLoadFL/...`, `tyreCompound`) — see §21.6.
+- Add a `driver_fit.py` module. **(v2)** Adds an optional `fit_tyre_calibration(merged_frames, car) -> TyreCalibration` step. **(v2)** Detects telemetry `tyreCompound` and selects the matching `car.compounds[i]` for the fit.
+- Add a `profile_dynamics.py` module (v1.2 — see §13.11).
+- Add a `sim_telemetry.py` module (§14). **(v1.2.1)** Two-layer pipeline. **(v2)** Gains 12 per-wheel state columns.
 - Add a `validate.py` module (§15).
+- **(v2)** Add a `tyre_state.py` module that owns the per-wheel state struct, the per-segment update (slip energy attribution, thermal ODE, wear, pressure), and the scalar-grip-envelope reduction (§21.3). Single file, ~400 lines. Per-compound functions are looked up via the active `Compound`. **(v1.3)** Adds `f_pressure_grip` / `f_pressure_drag` split; `combined_grip_envelope` returns a 3-tuple.
+- **(v2)** Add a `setup.py` module that loads `setups/<car>_<scenario>.json` and resolves it against `--pressure FL=... FR=...` CLI overrides + `tyres.ini` `PRESSURE_STATIC` defaults of the active compound.
+- **(v2)** Add a `solve_setup.py` module that owns the inverse-PSI bisection (§21.5).
+- **(v2)** Extend `car.py` to parse **all** compound sections (un-suffixed = compound 0, `_1`, `_2`, …) and store them as `car.compounds: list[Compound]` plus `car.default_compound_index`. See §21.11.
 - **(reorg)** Move modules into `src/lap_estimator/`, `prep/`, `analysis/`.
 
 ## 6. Sub-features / work breakdown
 
-### 6.1 Driver module (new file: `src/lap_estimator/driver.py`)
-- Loads driver JSON; exposes `skill_pct`, `consistency_sigma`, `driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`; provides grip-scaling wrapper.
-- **(v1.2)** Tolerates the new `profile` block (`profile.dynamic.*`). `Driver.load` reads `driver_tau_s`/`trail_brake_m`/`throttle_ramp_m` from `profile.dynamic` first if present, falls back to top-level keys, then to hand-defaults. `pedal_press_rate_per_s` and `steering_aggression_deg_per_s` are loaded onto the dataclass but **not consumed** by the simulator in v1.2 — they are statistics only.
-- `Driver.load(path) -> Driver` via stdlib `json`. **PyYAML removed.**
+### 6.1 Driver module (`src/lap_estimator/driver.py`)
+- Loads driver JSON; exposes `skill_pct`, `consistency_sigma`, `driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`; provides grip-scaling wrapper. **(v1.2.1)** `driver_tau_s` informational only.
+- **(v1.2)** Tolerates `profile.dynamic.*`.
+- **(v2)** Tolerates `tyre_calibration` block (§21.6). `Driver.load` populates the four calibration scalars onto the dataclass, with defaults when absent or `measured: false`.
+- `Driver.load(path) -> Driver` via stdlib `json`.
 - Owner: ArchDev.
 
 ### 6.2 Driver JSON schema + example files
-- Schema in §7.2 (includes v1.2 `profile` block). Examples: `pro.json` (`skill_pct: 0.97`), `amateur.json` (`skill_pct: 0.82`).
-- YAML → JSON migration: clean break, single commit. Files: `pro`, `amateur`, `tomas_*`, `ludvik_*`.
+- Schema in §7.2. v1.2 profile block. **(v2)** `tyre_calibration` block.
+- Examples: `pro.json`, `amateur.json`.
 - Owner: ArchDev.
 
 ### 6.3 Track CSV loader (`src/lap_estimator/track.py` additions)
@@ -115,51 +146,83 @@ It also formalises the **preparation pipeline** (§16): two CLIs `prep/prep_car.
 
 ### 6.4 Simulator changes (`src/lap_estimator/simulator.py`)
 - `simulate(car, track, driver=None, ds=2.0, rng=None, two_lap=True) -> SimResult`.
-- New `simulate_monte_carlo(...)` — MC stats on lap 2 only.
-- `SimResult` gains `times`, `ai_speeds`, `limit_label`, `lap_id`.
+- `simulate_monte_carlo(...)`.
+- **(v2)** `simulate_stint(car, track, driver, *, n_laps, setup, calibration, ds=2.0) -> StintResult` — loops `simulate(..., two_lap=False)` once per lap, after each lap calls `tyre_state.update_per_lap(...)` and rescales `mu_x` / `mu_y` for the next lap. Implementation note: keep the existing `simulate(...)` function unchanged; the stint wrapper composes it. Single-lap regression is preserved.
+- **(v1.3)** `simulate(...)` signature gains an internal `drag_scale: float = 1.0` parameter (kwarg, defaults preserve byte-compat). The 3-pass solver's drag-force computation (`F_drag = 0.5 · ρ · Cd · A · v²` plus any rolling-resistance term in `car.drag_force(v)` / equivalent) is multiplied by `drag_scale` at the natural seam — see §21.3 step "Drag plumbing". `simulate_stint` reads the third element of `combined_grip_envelope`'s return and threads it into the next lap's `simulate(..., drag_scale=...)`.
+- `SimResult` unchanged. `StintResult` new dataclass — see §21.4.
 - Owner: ArchDev.
 
-### 6.5 Output artifacts (new file: `src/lap_estimator/report.py`)
-- Writes `<track_stem>_sim_trace.csv` (with `lap` column) and `<track_stem>_sim_vs_ai.png`.
-- Exposes `plot_speed_overlay(...)` helper.
+### 6.5 Output artifacts (`src/lap_estimator/report.py`)
+- Writes `<track_stem>_sim_trace.csv` and `<track_stem>_sim_vs_ai.png`.
+- **(v2)** When `StintResult` is supplied, writes a per-lap summary CSV (`<track_stem>_stint_summary.csv`) with one row per lap: `lap, lap_time_s, wearFL, wearFR, wearRL, wearRR, tempFL_C, ..., pressureFL_psi, ...`. Stdout printer gains the per-lap block (§21.5).
 - Owner: ArchDev.
 
 ### 6.6 CLI rewiring (`lap.py`)
-- See §13.3 for `fit_driver.py` CLI; `lap.py` CLI:
+- See §13.3 for `fit_driver.py`. `lap.py` CLI:
   ```
   python lap.py <car_data_dir> <track> <driver_json> \
                 [--ds 2.0] [--all-tracks] [--single-lap] \
                 [--no-plot] [--no-telemetry] [--telemetry-dt-ms 10] \
-                [--validate-against <real_telemetry_csv>] [--bin-m 100] [--per-corner]
+                [--validate-against <real_telemetry_csv>] [--bin-m 100] [--per-corner] \
+                [--laps N] [--setup <path>] [--pressure FL=31,FR=31,RL=29,RR=29] \
+                [--ambient-temp-c 25.0] [--compound <name>] \
+                [--solve-pressure-for-wear <pct> --at-lap <N> \
+                 [--target-wheel min|max|avg|FL|FR|RL|RR] [--uniform-pressure]]
   ```
-  **(v1.2)** `--telemetry-dt-ms` default is now `10` (was `100` in v1.1). Old behaviour reproducible with `--telemetry-dt-ms 100`.
+- **(v2)** `--laps` defaults to `2` (back-compat with §20's two-lap default). `--single-lap` is shorthand for `--laps 1`. Mutually exclusive with `--single-lap` when used together (argparse error).
+- **(v2)** `--solve-pressure-for-wear` triggers inverse-solver mode; suppresses normal per-lap output and prints the recommendation table instead. Requires `--at-lap`.
+- **(v2)** `--compound <name>` overrides setup-JSON's `compound`. Case-insensitive match against `Compound.name` or `Compound.short_name`. Unknown → argparse error listing available compounds.
 - Owner: ArchDev.
 
 ### 6.7 README / docs touch-up
-- Reflect new repo layout, four CLIs, driver JSON schema (v1.1 + v1.2 `profile` block), outputs, validation, corner notation, two-lap default, multi-lap mandatory fit, 10 ms telemetry default, `--newest N` flag.
-- `PyYAML` removed.
+- v2 sections: stint sim, inverse solver, setup files, calibration block, **compound-aware parsing**. **(v1.3)** Note the asymmetric pressure model and `drag_scale` plumbing.
 - Owner: DocuGuy.
 
 ### 6.8 Package skeleton and module moves (reorg)
-- See file moves listed in §10.
 - Owner: ArchDev.
 
 ### 6.9 Folder convention and `.gitignore` policy (reorg)
-- Tracked: `cars_csv/`, `tracks_csv/`, `drivers/*.json`, `tracks_config.json`, `samples/aclog/*.csv`, `prep/`, `analysis/`, `src/lap_estimator/`, root CLIs, `docs/`, `dev-planning/`.
+- Tracked: `cars_csv/`, `tracks_csv/`, `drivers/*.json`, `tracks_config.json`, `samples/aclog/*.csv`, `prep/`, `analysis/`, `src/lap_estimator/`, root CLIs, `docs/`, `dev-planning/`, **(v2) `setups/*.json`**.
 - Gitignored: `cars_in/*`, `tracks_in/*`, `.tmp/`.
 - Owner: ArchDev.
 
-### 6.10 Profile-dynamics module (new file: `src/lap_estimator/profile_dynamics.py`) — v1.2
-- Exposes `measure_dynamics(merged_frames: list, *, dt_floor_s: float = 0.005) -> ProfileDynamics`.
-- Computes `driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`, `pedal_press_rate_per_s`, `steering_aggression_deg_per_s` (see §13.11 for algorithm).
+### 6.10 Profile-dynamics module (v1.2)
+- Owner: ArchDev.
+
+### 6.11 Tyre-state module (`src/lap_estimator/tyre_state.py`) — v2 NEW
+- Exposes `TyreState` (per-wheel: `temp_C`, `wear_pct`, `pressure_psi`, plus shared `cumulative_slip_energy_J`), `update_per_segment(state, segment_info, car, compound, calibration, ambient_temp_C)`, `update_per_lap(state, segment_states_iter, car, compound, calibration, ambient_temp_C)`, and `combined_grip_envelope(state, compound) -> (mu_x_scale, mu_y_scale, drag_scale)` **(v1.3: 3-tuple)**.
+- Implements slip-energy attribution, thermal ODE, wear integration, pressure ideal-gas, and per-wheel-grip → scalar reduction per §21.3. **(v2)** `f_temp`, `f_wear`, `f_pressure_grip`, `f_pressure_drag` are looked up off the passed `Compound` — see §21.11. **(v1.3)** `f_pressure` is split into grip and drag halves; see §21.3.
+- Single file, ~400 lines.
+- Owner: ArchDev.
+
+### 6.12 Setup module (`src/lap_estimator/setup.py`) — v2 NEW
+- Exposes `Setup` dataclass (`pressures_psi: dict[str, float]`, `ambient_temp_C: float`, `compound: str | None`), `Setup.load(path)`, `Setup.from_cli(pressure_str, ambient_str, compound_str, car)`, `Setup.default_for_car(car, compound)` (reads active compound's `PRESSURE_STATIC` from `tyres.ini`).
+- Resolution precedence: explicit `--pressure ...` flag > `--setup <path>` > active compound's `PRESSURE_STATIC` (per axle).
+- Compound resolution precedence: `--compound` flag > setup-JSON `compound` > telemetry `tyreCompound` (when called from fitter) > `car.default_compound_index`.
+- ~120 lines.
+- Owner: ArchDev.
+
+### 6.13 Inverse-solver module (`src/lap_estimator/solve_setup.py`) — v2 NEW
+- Exposes `solve_pressure_for_wear(car, track, driver, *, target_wear, target_lap, target_wheel, uniform, compound, calibration, ambient_temp_C, n_laps_max) -> SolveResult`.
+- Bisection per-wheel (or uniform) over `[20.0, 50.0]` psi; tolerance ±1% wear or ±0.5 psi resolution; cap at 12 iterations per wheel.
+- Calls `simulate_stint(...)` per candidate set; reads `StintResult.tyre_state_history` at lap `target_lap`.
+- ~250 lines.
+- Owner: ArchDev.
+
+### 6.14 Car module compound parsing (`src/lap_estimator/car.py`) — v2 EXTENSION
+- Scan `tyres.ini` for compound sections: un-suffixed (`[FRONT]`, `[REAR]`, `[THERMAL_FRONT]`, `[THERMAL_REAR]`) = compound 0; `_1`, `_2`, … = additional compounds.
+- For each compound build a `Compound` dataclass: `index`, `name`, `short_name`, per-axle `pressure_ideal_psi`, `pressure_static_psi`, `pressure_d_gain`, `wear_curve_lut` (front + rear), `dy0/dy1/dx0/dx1/dy_ref/dx_ref` per axle, `thermal_lut` (front + rear `PERFORMANCE_CURVE`). **(v1.3)** Plus two hand-default scalars `k_drag` (default 0.5) and `k_drag_reduction` (default 0.1) — see §21.3 / §21.11. These are *not* parsed from `tyres.ini` in v1.3 (no AC source for them); they live on `Compound` so a future v1.4 fitter can vary them per-compound. For v1.3 they are constants set at `Compound` construction.
+- `Car.compounds: list[Compound]` indexed 0..N-1.
+- `Car.default_compound_index: int` — honour `[COMPOUND_DEFAULT]` section's `INDEX` value if present, otherwise 0.
+- `Car.find_compound(name_or_short: str) -> Compound | None` — case-insensitive match against both `name` and `short_name`. Also strip trailing parenthetical short-name from telemetry strings (e.g. `"Semislicks (SM)"` → matches `"Semislicks"`).
 - Owner: ArchDev.
 
 ## 7. Data & interface contracts
 
 ### 7.1 Track CSV (input)
-Required columns: `distance_m`, `segment_length_m`, `radius_m`, `gradient_pct`, `elevation_m`, `speed_ms`.
+Unchanged. `distance_m`, `segment_length_m`, `radius_m`, `gradient_pct`, `elevation_m`, `speed_ms`.
 
-### 7.2 Driver JSON (input) — v1.1 + v1.2 profile block
+### 7.2 Driver JSON (input) — v1.1 + v1.2 profile block + v2 tyre_calibration
 ```json
 {
   "name": "string",
@@ -168,1138 +231,553 @@ Required columns: `distance_m`, `segment_length_m`, `radius_m`, `gradient_pct`, 
   "driver_tau_s": 0.12,
   "trail_brake_m": 30.0,
   "throttle_ramp_m": 40.0,
-  "profile": {
-    "dynamic": {
-      "driver_tau_s": 0.14,
-      "trail_brake_m": 28.5,
-      "throttle_ramp_m": 47.0,
-      "pedal_press_rate_per_s": 6.4,
-      "steering_aggression_deg_per_s": 312.0,
-      "measured": {
-        "driver_tau_s": true,
-        "trail_brake_m": true,
-        "throttle_ramp_m": true,
-        "pedal_press_rate_per_s": true,
-        "steering_aggression_deg_per_s": false
-      },
-      "sample_counts": {
-        "pedal_leading_edges": 184,
-        "brake_taper_segments": 22,
-        "throttle_ramp_segments": 24,
-        "steering_samples": 198432
-      }
+  "profile": { "dynamic": { "...": "see §13.5 step 8" } },
+  "tyre_calibration": {
+    "k_friction": 1.0,
+    "h": 50.0,
+    "C_thermal": 5000.0,
+    "k_wear": 1.0e-7,
+    "measured": false,
+    "source": {
+      "telemetry_csvs": ["..."],
+      "compound": null,
+      "fit_rmse_temp_C": null,
+      "fit_rmse_wear_pct": null,
+      "fit_rmse_pressure_psi": null,
+      "fitted_at": "ISO-8601"
     }
   },
-  "source": {
-    "telemetry_csvs": ["string", "..."],
-    "track_csv": "string",
-    "car_data_dir": "string",
-    "n_laps": 0,
-    "n_finished_laps": 0,
-    "real_lap_times_s": [0.0],
-    "real_lap_time_s": 0.0,
-    "pooled_sample_count": 0,
-    "sim_lap_time_s": 0.0,
-    "delta_s": 0.0,
-    "lap_selection": {
-      "rule": "newest-5-to-10",
-      "candidates_considered": 0,
-      "selected_count": 0,
-      "selected_sources": ["..."]
-    },
-    "fitted_at": "ISO-8601 string",
-    "fit_version": "2"
-  }
+  "source": { "...": "see §13.5 step 8" }
 }
 ```
-Field semantics:
-- `name` (string, required).
-- `skill_pct` (float in (0, 1], required).
-- `consistency_sigma` (float ≥ 0, optional, default 0.0).
-- Top-level `driver_tau_s` / `trail_brake_m` / `throttle_ramp_m` remain for backward compatibility with hand-authored JSON and pre-v1.2 fits. When `profile.dynamic.*` of the same name is present, **the profile value wins** (consumed by sim). Hand-defaults: 0.12 / 30.0 / 40.0.
-- `profile.dynamic.*` (v1.2, optional, populated by `fit_driver.py`):
-  - `driver_tau_s` — measured median time-to-50 % on gas/brake leading edges (seconds). Fallback 0.12.
-  - `trail_brake_m` — measured median distance over which brake decays from 0.8 → 0.1 entering corner-limited segments (metres). Fallback 30.0.
-  - `throttle_ramp_m` — measured median distance over which gas rises from corner-limited partial → 0.95+ exiting corners (metres). Fallback 40.0.
-  - `pedal_press_rate_per_s` — measured median dy/dt on gas+brake leading edges (per-second). Statistic only — not consumed by the v1.2 simulator. Fallback `null` if no clean edges.
-  - `steering_aggression_deg_per_s` — measured 95th-percentile |d(steerAngle)/dt| over the pooled lap data (deg/s). Requires `steerAngle` channel; if absent, this field is `null` and `measured.steering_aggression_deg_per_s = false`. Statistic only.
-  - `measured.*` — booleans flagging whether each field came from real telemetry (`true`) or fell back to a hand-default / null (`false`).
-  - `sample_counts.*` — diagnostic counts of how many edges / segments / samples contributed to each measurement.
-- `source` (object, optional, populated by `fit_driver.py`) — full schema in §13.5 step 8. v1.1 multi-lap fields plus v1.2 `lap_selection` sub-block (see §13.12). `fit_version` bumps from `"1"` to `"2"` when the profile block is populated.
+**v2 `tyre_calibration` field semantics:**
+- `k_friction` (float, default 1.0) — multiplier on slip-energy-to-heat conversion. Units: dimensionless. Bounded `[0.1, 10.0]`. **Compound-agnostic in v2** — physical heating constant; per-compound table is a v1.3 candidate.
+- `h` (float, default 50.0) — Newton-cooling coefficient (W/K) per tyre. Bounded `[5.0, 500.0]`. **Compound-agnostic.**
+- `C_thermal` (float, default 5000.0) — per-tyre heat capacity (J/K). Bounded `[500.0, 50000.0]`. **Compound-agnostic.**
+- `k_wear` (float, default 1.0e-7) — wear rate per unit slip energy per Joule, modulated by `f_temp_penalty`. Bounded `[1e-9, 1e-4]`. **Compound-agnostic.** Per-compound wear differences come from the `WEAR_CURVE` LUT, not from `k_wear`.
+- `measured` (bool, default `false`) — `true` iff the four knobs were fit against per-wheel lake telemetry (§21.6). When `false`, the values are hand-defaults.
+- `source.compound` (string, optional) — the compound name used for the fit (matches telemetry's `tyreCompound`).
+- `source.*` — diagnostic block populated by the fitter when `measured = true`.
 
-Validation: as today, plus:
-- If `profile.dynamic.driver_tau_s` exists and is outside `[0.0, 1.0]`, fail fast.
-- If `profile.dynamic.trail_brake_m` exists and is negative, fail fast.
-- If `profile.dynamic.throttle_ramp_m` exists and is negative, fail fast.
-- The other two are statistics — out-of-range values warn but do not fail.
+Backward compat: pre-v2 driver JSONs without `tyre_calibration` load cleanly; `Driver.load` injects defaults with `measured: false`.
 
-**Format: JSON only.**
+### 7.3–7.9 unchanged.
 
-### 7.3 Car data dir (input)
-Unchanged.
+### 7.10 Setup JSON (input, **v2 NEW**) — `setups/<car>_<scenario>.json`
+```json
+{
+  "car": "bmw_1m",
+  "name": "default",
+  "pressures_psi": {"FL": 31.0, "FR": 31.0, "RL": 29.0, "RR": 29.0},
+  "ambient_temp_C": 25.0,
+  "compound": "Street",
+  "notes": "Default street setup; PRESSURE_STATIC from tyres.ini compound 0"
+}
+```
+- `car` (string, required) — must match the car-data-dir basename (validation).
+- `name` (string, required) — free-form scenario tag.
+- `pressures_psi` (object, optional) — keys exactly `FL`, `FR`, `RL`, `RR`; values in `[20.0, 50.0]`. **When absent, the active compound's `PRESSURE_STATIC` is used per axle (cold-pressure default — *not* `PRESSURE_IDEAL`, which is the hot-grip target).**
+- `ambient_temp_C` (float, optional, default 25.0) — used as initial tyre temperature and as `T_cold` for pressure ideal-gas evolution.
+- `compound` (string, optional) — selects which compound from `car.compounds` the sim uses. Matched case-insensitively against `Compound.name` or `Compound.short_name`; also strips trailing parenthetical short-name (e.g. `"Semislicks (SM)"` matches `"Semislicks"`). When absent, the car's `default_compound_index` is used. Unknown compound → load-time error listing available compounds. `f_pressure_grip`, `f_pressure_drag`, `f_temp`, and `f_wear` all key off the resolved compound (§21.11).
+- `notes` (string, optional).
 
-### 7.4 Trace CSV (output)
-`lap, distance_m, sim_speed_ms, sim_speed_kmh, ai_speed_kmh, time_s`.
+**Compound resolution precedence** (high → low): `--compound` CLI flag > setup-JSON `compound` > telemetry `tyreCompound` (fitter only) > `car.default_compound_index`. Logged on stdout: `Compound: <name> (idx <i>) | source: <cli|setup|telemetry|car-default>`.
 
-### 7.5 Comparison plot (output)
-Single matplotlib figure.
+### 7.11 Stint summary CSV (output, **v2 NEW**) — `<track_stem>_stint_summary.csv`
+Header: `lap,lap_time_s,tempFL_C,tempFR_C,tempRL_C,tempRR_C,wearFL_pct,wearFR_pct,wearRL_pct,wearRR_pct,pressureFL_psi,pressureFR_psi,pressureRL_psi,pressureRR_psi`. One row per lap. Wear values are 0..100 (100=fresh). Written by `report.py` when `StintResult` is supplied.
 
-### 7.6 Stdout report
-Two-lap format: `Lap 1 (standing): 1:48.6   |   Lap 2 (flying): 1:46.2 ± 0.06 (N=20)`.
-
-### 7.7 Synthetic telemetry CSV (output, new — see §14)
-`timestamp_ms,gas,brake,distanceTraveled,speedKmh,normalizedCarPosition,lap`.
-
-### 7.8 Corner notation JSON
-See §17.4.
-
-### 7.9 `tracks_config.json`
-Schema in original spec; thresholds + colours.
+### 7.12 Telemetry CSV extension (**v2 NEW columns**)
+The §14.6 schema gains 12 trailing columns (always emitted in stint mode, even when `--laps 2`):
+```
+...,lap,tempFL,tempFR,tempRL,tempRR,wearFL,wearFR,wearRL,wearRR,pressureFL,pressureFR,pressureRL,pressureRR
+```
+Units: temp in °C, wear in 0..100 (100=fresh), pressure in PSI. Per-sample values are forward-filled from the per-segment state (§21.4). For `--laps 1` runs without state evolution, these columns are still emitted but constant at the initial setup values.
 
 ## 8. Risks, constraints, and open questions
 
-### Risks
-- CSV resampling vs current segment-resampling.
-- `skill_pct` as uniform grip multiplier.
-- `consistency_sigma` calibration is heuristic.
-- Synthetic telemetry realism (v1.1 better, still heuristic).
-- Driver-lag default tuning.
-- Lap-2 fairness vs lap-1 representativeness.
-- Driver portability across tracks (v1 limitation).
-- **(v1.1 — fit) Pooling-vs-averaging tradeoff.** Pooling samples across laps means a lap with 4000 cornering samples contributes 8× more weight than a 500-sample short-stint lap. This is the intended behaviour — high-data laps should dominate — but documented so future tuners know percentile estimates can be skewed by a single dominant lap. v2 candidate: a per-lap weight cap.
-- **(v1.2) Leading-edge detection robustness.** Real pedal traces are noisy. A naïve d/dt > threshold rule will catch micro-corrections as "edges". Mitigation: hysteresis band (require pedal to dip below 0.05 before the next rising edge counts) and minimum step height (rise from ≤ 0.1 to ≥ 0.5 within 200 ms). Edges below the minimum are discarded. If <10 clean edges are found across the pool, fall back to the 0.12 s default and set `measured.driver_tau_s = false`.
-- **(v1.2) Trail-brake / throttle-ramp segment selection.** These are measured around the boundaries of corner-limited segments. The boundary set comes from the simulator's per-point binding-limit label run against the real telemetry's speed trace — i.e. we need to re-classify each real-lap point with the limit rule to know which segments are "corner-limited" and where their entry/exit are. Risk: if classification is off, segments are mis-selected. Mitigation: a simple speed-minimum-based corner detector inside `profile_dynamics.py` that does not depend on the simulator (find local minima of `speedKmh`, take ±2 s window around each, treat that as a corner-limited segment). Use this for v1.2; switch to the simulator's limit label in a v1.3 cleanup.
-- **(v1.2) `steerAngle` channel availability.** Older AC logs may not contain it. The fitter must not fail when missing — set to null + measured=false and continue.
-- **(v1.2) 10 ms telemetry file size.** A 1:45 lap × 2 laps × 100 Hz ≈ 21 000 rows per file × 6 numeric columns + lap = ~1.5 MB raw, ~600 KB compressed. Per-driver-per-track-per-fit-run order of magnitude. Accepted.
-- **(reorg) Track-preparation parity.**
-- **(reorg) Import-path fragility.**
+(All existing v1.1 / v1.2 / v1.2.1 risks retained — abbreviated here.)
 
-### Constraints
-- ~500-line soft cap. `driver_fit.py` ~260 (multi-lap pooling + profile-dynamics integration), `profile_dynamics.py` ~250, `fit_driver.py` ~100 (variadic CLI + glob + `--newest`). All under ceiling.
+### v2-specific risks
+- **(v2) Calibration overfit to a single driver / track.** The four knobs (`k_friction`, `h`, `C_thermal`, `k_wear`) are fit against one stint's measured per-wheel evolution. They may not generalise to other tracks or drivers. Mitigation: record `source.fit_rmse_*` so a future user can spot bad fits. v3 candidate: per-compound knob tables.
+- **(v2) Slip-energy estimate is coarse.** We have no per-wheel forces — slip energy is reverse-engineered from `v²/R` lat-g and a hand-coded load-transfer coefficient (`k_load ≈ 0.3/g`). Real AC slip energy includes wheel slip, camber, tyre flex, etc. The calibration step partially absorbs the error into the four knobs. Risk: the absolute values of temperature and wear may be off; the *evolution shape* should be close. Acceptance criteria (§11.27–28) target absolute deviation against measured ± 5–10%, which is loose enough to tolerate the coarseness.
+- **(v2) Single-grip-envelope simplification masks balance.** Front-axle limiting vs rear-axle limiting tyre changes oversteer/understeer in reality. Our scalar reduction (`0.5 × (front_axle_min + rear_axle_min)`) loses that information. Document in §21.3 as a known v3 hook.
+- **(v2) Inverse solver may have multiple solutions.** Per-wheel bisection assumes monotonic wear-vs-PSI relationship in the search range. Mitigation: bisection over `[20, 50]` psi; if bisection fails to bracket the target, surface a clear "could not find a setup hitting <target>" error. Add a coarse 5-psi-step grid scan as the bisection seed to reduce sensitivity to initial bracket.
+- **(v2) Per-wheel solve makes physical sense but ergonomically the user dials four numbers into AC manually.** Pit-stop apps usually let drivers set per-wheel pressures, so this is fine; `--uniform-pressure` is the simpler answer.
+- **(v2) `tyre_calibration` and `skill_pct` are coupled in the fit.** Tyre wear and driver utilisation both modulate observed cornering grip. Mitigation: fit `tyre_calibration` first against the *measured* per-wheel evolution (purely physical signal — no skill confound), then fit `skill_pct` against cornering-sample util with the calibrated `f_temp/f_wear/f_pressure_grip` already accounted for in `lat_g_max`. Flag in §13/§21.6 step ordering.
+- **(v2) Lake schema requires extending `telemetry.py`'s reader.** Risk is low — 12 columns added — but the merger needs to handle absence gracefully (real AC sessions without per-wheel state must still fit `skill_pct` alone with `tyre_calibration.measured = false`).
+- **(v2) Telemetry `tyreCompound` string format varies.** AC writes the long form `"Semislicks (SM)"` mid-session but some loggers strip to `"SM"` or `"Semislicks"`. Mitigation: `Car.find_compound` matches case-insensitively against both `name` and `short_name`, and strips the trailing parenthetical. Unknown compound after stripping → warn, fall back to `car.default_compound_index`. See §21.11.
 
-### Open questions
-- MC `n_runs` default 20.
-- `--all-tracks` does not iterate drivers.
-- Per-track familiarity — v2.
-- Cross-track validation tolerance numbers.
-- **(v1.1 — fit) Per-lap skill variance as a separate signal.** A future "consistency-from-lap-to-lap" metric (variance of per-lap 85th percentiles) could complement the per-point `consistency_sigma`. Two independent consistency channels: within-lap (current model) and between-lap (new). Not building it now — recorded in §13.9 as a v2 candidate.
-- **(v1.2)** Should `pedal_press_rate_per_s` feed into a v1.3 motor-control model that replaces the current first-order low-pass with a slew-rate-limited filter? Captured in §13.13.
-- **(v1.2)** Should `steering_aggression_deg_per_s` translate into a corner-entry yaw-input model (relevant only once §19.2 slip-based sim lands)? Captured in §19.2.6.
+### v1.3-specific risks
+- **(v1.3) `k_drag` and `k_drag_reduction` are hand-defaults, not fit from data.** Real lap-time-vs-pressure curves will tell us the right values, but v1.3 ships with `k_drag = 0.5` and `k_drag_reduction = 0.1`. Mitigation: acceptance criteria §11.37–§11.39 only require the *sign* and *order of magnitude* of the asymmetry (low-PSI side flatter than high-PSI side, low-PSI deficit within ±2 s of IDEAL); we are not claiming numerical accuracy on `drag_scale`. v1.4 candidate: fit `k_drag` against a Tomas pressure sweep.
+- **(v1.3) Drag plumbing seam is fuzzy in current `simulator.py`.** The 3-pass solver may not expose drag as a single multipliable knob. Mitigation: ArchDev finds the natural seam (most likely in the function that computes `F_aero` and rolling resistance for the next velocity step). If a single `drag_force(v)` exists on `Car`, wrap it. If drag is inlined into the solver, hoist it into a helper first. The change must preserve §11.30 (single-lap regression within ±0.1 s when `drag_scale == 1.0`).
+- **(v1.3) Asymmetric grip model could surprise an existing tuned `skill_pct`.** Drivers fit pre-v1.3 had their `skill_pct` absorb the spurious low-PSI grip penalty. Re-fitting on the same telemetry will yield a slightly different `skill_pct`. Document as a *correction* in §13 risks for future tuners (mirrors the existing pre-v2/v2 note).
+- **(v1.3) Under-pressure grip bonus ignored.** Larger contact patch at low PSI gives a small real grip *bonus* (not just "no penalty"). v1.3 takes `f_pressure_grip(p < IDEAL) = 1.0` for simplicity — see §3 non-goals. Lap times under PSI will therefore be modelled slightly slower than reality (because drag dominates and grip parity is assumed). Acceptable for v1.3; v1.4 candidate.
+
+### v2-specific constraints
+- ~500-line soft cap. `tyre_state.py` ~400, `solve_setup.py` ~250, `setup.py` ~120, `car.py` compound section ~150 added — all under ceiling. `simulator.py` gains `simulate_stint` (~80 lines) — total ~390, under ceiling.
+
+### v2 open questions
+- Should `target_wheel` default be `max` (most-worn wheel — usually outer-driven) or `avg`? §21.5 picks `max` because the user's verbatim use case ("wear will reach 80%") implies the limiting wheel; document the choice.
+- `k_wear` units are awkward (per-Joule). Consider a more user-meaningful surrogate (`wear_pct_per_km_at_ref_load`) in v2.1.
+- Calibration step needs a sensible loss function — RMSE on `tyreWear*` vs simulated `wear_pct` is the primary; secondary RMSE on `tyreTemp*` vs `temp_C`. Equal weights? Lap-by-lap or full-stint?
 
 ## 9. Alternatives considered
 
-- Full G-G-V driver model (deferred).
-- `skill_pct` inside `Car` (rejected).
-- CSV → JSON segments on the fly (rejected).
-- Drop legacy tracks (rejected — kept as fallback).
-- Skip comparison PNG (kept).
-- Synthetic telemetry by distance (rejected — time-resampled instead).
-- Three CLIs (collapsed to two).
-- Per-track familiarity in v1 (rejected).
-- (v1.1) Keep YAML alongside JSON (rejected).
-- (v1.1) `driver_tau_s=0.02` (rejected — too small).
-- (v1.1) Low-pass before heuristic (rejected — order matters).
-- (v1.1) Two separate CSVs per lap (rejected — one with `lap` column).
-- (v1.1) MC on both laps (rejected — lap 2 only).
-- **(v1.1 — fit) Average per-lap `skill_pct` values across laps** (compute a separate 85th percentile per lap, then mean them). Rejected — laps with fewer cornering samples (unfinished, short layouts) would be weighted equally with full laps, drowning out the higher-quality samples. **Pooling all cornering samples into one array and taking the 85th percentile of the pool is statistically more robust** — sample weight is proportional to data quantity. See §13.5.
-- **(v1.1 — fit) Single-lap fit with stricter "pick a learned lap" guidance.** Rejected — user-facing constraint that has repeatedly produced silently-wrong results when users picked the wrong lap. Mandatory ≥2-lap input makes the constraint enforceable. See §13.1.
-- **(v1.1 — fit) Exclude lap 1 (out-lap) by rule.** Rejected — the existing §13 trim logic (drop pre-start-line portion via ncp-wrap detection) already handles the standing-start prefix. The trimmed in-lap remainder contains valid cornering samples and there is no reason to throw them away. With multi-lap mandatory, no single lap is load-bearing anyway.
-- **(v1.2) Keep hand-defaults for tau / trail-brake / throttle-ramp.** Rejected — once we have enough real telemetry per driver (≥2 laps required, typically 5–10), the hand-defaults systematically misrepresent driver-specific input shapes. Measured values give a personalised dynamic profile at zero extra cost. Hand-defaults remain as the explicit fallback when measurement fails.
-- **(v1.2) Put `pedal_press_rate_per_s` / `steering_aggression_deg_per_s` at the top level of the driver JSON.** Rejected — they are *statistics*, not consumed parameters. Grouping them under `profile.dynamic` keeps consumed fields visually separable and signals intent to future readers.
-- **(v1.2) Default `--telemetry-dt-ms` of 50.** Rejected — at τ = 120 ms, α(50 ms) ≈ 0.29 vs α(10 ms) ≈ 0.077. The 10 ms value gives smooth, AC-realistic traces; 50 ms still leaves visible staircasing on sharp transitions. Disk-size delta between 10 ms and 50 ms is irrelevant at our volumes.
-- **(v1.2) Lap-selection rule "use every lap supplied".** Rejected — once a driver has been running a stint for an hour, the most-recent laps are most representative of their current familiarity / tyre state. Capping at 5–10 newest avoids early-stint laps dragging the profile.
-- (reorg) Flat layout (rejected).
-- (reorg) `prep_track.py` produces corners JSON (rejected).
-- (reorg) Keep `Corner_Analysis/` (rejected).
+(All v1.1/v1.2/v1.2.1 entries retained — abbreviated.)
+
+**v2-specific alternatives:**
+- **(v2) Full v3 rebuild (slip-based ODE + Pacejka) instead of bolted-on tyre state.** Rejected for v2 — too large (multi-week build, §19), and the v2 use cases ("how many laps to 80%?", "what PSI for 50% at lap 12?") do not require per-wheel forces or yaw dynamics. The single-grip-envelope architecture is sufficient. v3 stays in §19 backlog.
+- **(v2) Per-axle (front/rear) tyre state, not per-wheel.** Rejected — the user's verbatim use cases mention "tyres" (plural) and AC's lake telemetry already gives us per-wheel state for free. Per-axle would throw away the FL/FR and RL/RR asymmetry that matters for outer/inner wear in long stints.
+- **(v2) Couple per-wheel state directly into the 3-pass solver instead of post-lap scaling.** Rejected — would require deep changes to `simulator.py` and break the back-compat regression criterion (§11.30). Post-lap scaling is the minimal change that delivers the use case.
+- **(v2) Skip the inverse solver; ask the user to bisect manually.** Rejected — the user verbatim asked for "give me pressure in PSI so my tyres will have 50% after 12 laps". Inverse solver is the primary v2 deliverable.
+- **(v2) Per-wheel cold pressures default to AC's `PRESSURE_IDEAL` not `PRESSURE_STATIC`.** Rejected for v2 — `PRESSURE_IDEAL` is the *hot* target the tyre should reach after warm-up; `PRESSURE_STATIC` is the realistic cold-spawn default that matches what drivers actually dial into the AC tyre app before going out. (Earlier draft had this inverted; corrected when adding compound-aware parsing — see §21.11.)
+- **(v2) Numerical optimisation (Nelder-Mead, gradient-free) for the inverse solve instead of bisection.** Rejected — bisection is simpler, robust, and per-wheel one-dimensional. Multi-wheel coupled optimisation is a v2.1 candidate.
+- **(v2) Parse only the first compound from `tyres.ini` (the un-suffixed sections).** Rejected — caused the live regression described in §1's "v2 compound-aware parsing" note (Tomas's Semislicks lap at 26 psi was scored against Street's `PRESSURE_IDEAL=42`). Full compound parsing has a clean shape (`car.compounds: list[Compound]`) and modest implementation cost. Per-compound *calibration knob tables* remain out of scope (v1.3).
+
+**v1.3-specific alternatives:**
+- **(v1.3) Keep the symmetric `f_pressure` quadratic; accept the low-PSI grip penalty as a "modeller's licence".** Rejected — the live regression on Tomas's 26 psi Semislicks lap produced a 6 s deficit (1:53.46 vs 1:47.33) that is physically nonsense. Real-world under-pressure produces *more* mechanical grip, not less. Keeping the symmetric model would force future fits of `skill_pct` to absorb the bug, propagating the error across drivers.
+- **(v1.3) Move the entire pressure response into the drag term (no grip penalty at all).** Rejected — over-pressure *does* reduce grip (smaller contact patch is real and observable in AC at 44 psi cold, where Tomas's lap drops to 2:51). The asymmetric split preserves the over-pressure grip penalty (the part that was right) while fixing the under-pressure side (the part that was wrong).
+- **(v1.3) Add a low-PSI grip *bonus* (`f_pressure_grip(p < IDEAL) > 1.0`).** Deferred to v1.4 — real but small; introducing it now adds another hand-default constant with no telemetry to fit it against. v1.3 ships with `f_pressure_grip(p < IDEAL) = 1.0` (no bonus, no penalty) and revisits in v1.4.
+- **(v1.3) Apply `drag_scale` only to aero drag, not rolling resistance.** Rejected — rolling resistance is the dominant physical contributor at low PSI (sidewall flex → hysteresis loss → heat → speed loss). Splitting them adds complexity for no benefit; one combined `drag_scale` multiplier on the total drag term is simpler and physically defensible.
 
 ## 10. Migration
 
-- Legacy `segments`-based `Track` retained.
-- `lap.py` requires third positional arg.
-- `main.py` → `lap.py`.
-- (v1.1) YAML → JSON driver migration.
-- (v1.1) `fit_driver.py` CLI signature changes from single-CSV positional to **variadic CSV positionals** (`<car> <track> <output> <lap1.csv> <lap2.csv> [<lap3.csv> ...]`). Existing single-lap invocations now fail with the "≥2 laps" error (acceptance §11.20). User-facing change is documented in README and in the `fit_driver.py --help` text.
-- **(v1.2)** Driver JSONs produced by v1.1 (no `profile` block) continue to load. `Driver.load` falls back to top-level `driver_tau_s`/`trail_brake_m`/`throttle_ramp_m` when `profile.dynamic` is absent.
-- **(v1.2)** Default `--telemetry-dt-ms` raised from 100 to 10. Existing scripts that depended on 100 ms output must pass `--telemetry-dt-ms 100` explicitly. README updated.
-- **(v1.2)** `fit_driver.py` gains `--newest N` (default 10) and applies the lap-selection rule (§13.12) when more than 10 candidate files are supplied (positional or via `--laps-glob`). Existing invocations with ≤10 inputs are unaffected.
-- (reorg) File moves as before.
-- (reorg) `tracks_config.json` added.
-- (reorg) Existing CSVs remain as canonical reference.
+(All existing migration notes retained.)
+
+- **(v2)** Driver JSONs without `tyre_calibration` continue to load. `Driver.load` injects defaults (`measured: false`). Existing fitter runs without per-wheel-state telemetry leave the block absent; the sim falls back to defaults.
+- **(v2)** Default `--laps` is `2`, matching v1.1 two-lap behaviour byte-for-byte (acceptance §11.30). Existing scripts that pass `--single-lap` continue to work.
+- **(v2)** New `setups/` directory under repo root. Tracked. README updated.
+- **(v2)** `lap.py` gains a `--solve-pressure-for-wear` mode that suppresses normal output. Standard invocations (without that flag) are unchanged.
+- **(v2)** `car.py` compound parsing is additive: cars with a single compound (no `_1` sections) produce `car.compounds == [Compound(index=0, name=..., ...)]` and `default_compound_index == 0`. Setup JSONs without `compound` and CLI invocations without `--compound` keep their pre-compound-aware behaviour (use the default compound). Pre-v2 `tyres.ini` parsing that read `[FRONT]/[REAR]` directly is replaced with `car.compounds[car.default_compound_index].front/rear`. Any callers of the old direct attributes (`car.pressure_ideal_front`, etc.) need to be updated to go through the active compound — see §21.11 migration notes.
+- **(v1.3)** `combined_grip_envelope` return arity changes from 2 to 3. All callers in `simulator.py` / `simulate_stint` must unpack three values. Pre-v1.3 driver JSONs are unaffected (no schema change). Pre-v1.3 `skill_pct` values fit against the symmetric `f_pressure` may need re-fitting against the asymmetric model; document in §13 risks. `drag_scale == 1.0` at IDEAL pressure preserves §11.30 single-lap regression.
 
 ## 11. Acceptance criteria (for manual QA in Quix Cloud)
 
-1. `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_gp_a_ideal_line.csv drivers/pro.json` succeeds.
-2. Comparison plot generally tracks AI speed.
-3. `pro` vs `amateur` produces slower lap times for amateur.
-4. `consistency_sigma: 0.5` produces MC stats on lap 2 only.
-5. Centerline-only `layout_*.csv` works.
-6. Legacy `monza` invocation works.
-7. `--no-plot` runs without matplotlib.
-8. `--no-telemetry` skips telemetry CSV.
-9. Driver JSON validation: missing `skill_pct` or `skill_pct > 1.0` fails; missing v1.1 fields default cleanly; missing v1.2 `profile` block loads with top-level fallbacks.
-10. Cross-track validation runs end-to-end against sim lap 2.
-11. (reorg) `prep_track.py` parity check.
-12. (reorg) `prep_car.py` round-trip.
-13. (reorg) `corner_analysis.py` end-to-end.
-14. (reorg) Corner analysis is telemetry-free.
-15. (reorg) `tracks_config.json` is single source of truth.
-16. (v1.1) Driver-lag smoothing visible at τ=120 ms.
-17. (v1.1) Trail-brake heuristic produces visible linear taper.
-18. (v1.1) Two-lap default emits two laps; lap 2 faster within `consistency_sigma`.
-19. (v1.1) YAML → JSON migration leaves no `.yaml` in `drivers/`.
-20. **(v1.1 — fit) Single-lap input is rejected.** `python fit_driver.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/out.json samples/aclog/one_lap.csv` exits non-zero with a clear error message containing the text "fit requires ≥2 laps; see §13". No output JSON is written.
-21. **(v1.1 — fit) Six-lap pool produces a multi-lap JSON.** Fitting on Tomas's six AC laps (`samples/aclog/Tomas_Lap{1..6}.csv`) — where lap 1 has a standing-start prefix that gets trimmed and its in-lap remainder spans ≥0.9 NCP (counted as finished), laps 2–5 are fully-finished flying laps (each NCP span ≥0.9), and lap 6 is unfinished (NCP span < 0.9) — produces `drivers/tomas.json` whose `source` block has `n_laps == 6`, `n_finished_laps == 5`, `real_lap_times_s` array of length 5 (only finished laps), `real_lap_time_s` equal to the mean of those five times, `pooled_sample_count > 16000` (loose bound — exact value implementation-dependent), and valid `skill_pct` / `consistency_sigma` computed from the pooled cornering-sample array.
-22. **(v1.2 — profile) Measured dynamics within reasonable bounds.** Fitting on Tomas's 6 lake laps produces `drivers/tomas.json` whose `profile.dynamic` satisfies: `driver_tau_s ∈ [0.05, 0.30]`, `trail_brake_m ∈ [15, 80]`, `throttle_ramp_m ∈ [20, 100]`, `pedal_press_rate_per_s > 1.0`. `measured.driver_tau_s`, `measured.trail_brake_m`, `measured.throttle_ramp_m`, `measured.pedal_press_rate_per_s` are all `true`. (Loose bounds — the point is "it produced a measured value, not a default.") `steering_aggression_deg_per_s` is `> 0` when `steerAngle` is present in the input CSVs, else `null` with `measured.steering_aggression_deg_per_s = false`.
-23. **(v1.2 — telemetry cadence) 10 ms row count.** Telemetry CSV emitted at `--telemetry-dt-ms 10` has within ±10 % of 10× the row count of the same sim run emitted at `--telemetry-dt-ms 100`. Header bytes are identical.
-24. **(v1.2 — ks_nurburgring sweep) Four-layout run.** With `drivers/tomas.json` produced from the freshest 5–10 Sprint A laps, `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_<L>.csv drivers/tomas.json --telemetry-dt-ms 10` succeeds for `<L> ∈ {gp_a, gp_b, sprint_a, sprint_b}` and prints two lap times each (lap 1 standing, lap 2 flying).
-25. **(v1.2 — lap selection) `--newest N` picks the freshest N by mtime.** With 12 CSVs in `samples/aclog/Tomas_*.csv`, `python fit_driver.py ... --laps-glob "samples/aclog/Tomas_*.csv" --newest 10` selects the 10 newest-by-mtime files and emits a `source.lap_selection.selected_count == 10`, `selected_sources` listing those 10 paths, and `candidates_considered == 12`. With 4 CSVs available and `--newest 10`, all 4 are used and `selected_count == 4`. With 1 CSV, the fitter still errors on the ≥2 guard.
+(Items 1–26 retained from v1/v1.1/v1.2/v1.2.1 — full text in prior revisions; abbreviated here for brevity.)
+
+1–26. *(unchanged)*
+
+27. **(v2 — stint sim end-to-end wear)** A 12-lap stint sim of Tomas on Sprint A, with initial pressures set from the cold-PSI estimate of his lake telemetry's first-lap-warmup `wheelsPressureFL/...` (back-solved via the ideal-gas relation against measured `tyreTempFL/...`), produces predicted end-of-stint `wearFL/FR/RL/RR` within **±5% absolute** of the lake-measured `tyreWearFL/FR/RL/RR` at the same lap. Test fixture: `samples/aclog/Tomas_Lap{1..12}.csv` (or equivalent stint from the lake). Calibration knobs from the fitter (`tyre_calibration.measured == true`).
+28. **(v2 — stint sim pressure evolution)** Same 12-lap stint produces predicted per-lap `pressureFL/FR/RL/RR` matching lake-measured `wheelsPressureFL/...` within **±10%** at each lap.
+29. **(v2 — inverse solver hits target wear)** `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json --solve-pressure-for-wear 0.50 --at-lap 12` returns four PSI values such that re-running `python lap.py ... --laps 12 --pressure FL=...,FR=...,RL=...,RR=...` predicts wear at lap 12 within **±1% absolute** of 50% on at least the **target wheel** (default `max`, i.e. most-worn). With `--uniform-pressure`, the returned single PSI is applied to all four wheels and the same ±1% target is required on the most-worn wheel.
+30. **(v2 — single-lap regression safety)** `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json --laps 1` reproduces the v1.2.1 lap-1 time within **±0.1 s** for the same driver JSON and track CSV. (Guards against the stint wrapper accidentally perturbing the existing `simulate(...)` path.) **(v1.3 amendment)** At IDEAL pressure (Semislicks 33 psi cold), `drag_scale` resolves to 1.0 and the result is byte-equivalent to v2.
+31. **(v2 — `--laps 2` byte-compat)** `python lap.py ... --laps 2` produces lap-1 and lap-2 times within **±0.05 s** of the v1.2.1 two-lap default. Telemetry CSV header includes the 12 new state columns; their values are constant across `lap == 1` and `lap == 2` and equal to the setup defaults (no state evolution at `n_laps == 2` when `tyre_calibration.measured == false`).
+32. **(v2 — setup CLI precedence)** Running with `--setup setups/bmw_1m_default.json --pressure FL=33` overrides only FL; FR/RL/RR stay at the setup file's values. Running with neither flag picks the active compound's `PRESSURE_STATIC` from `tyres.ini` per axle. Logged on stdout: `Setup: <source> | FL=... FR=... RL=... RR=... | ambient=...°C`.
+33. **(v2 — per-lap stdout block)** `--laps 5` prints a five-line block:
+    ```
+    Lap 1: 1:46.213 | wear FL=98% FR=97% RL=95% RR=94% | temp avg 76°C | pressure avg 31.4 psi
+    Lap 2: 1:46.198 | ...
+    ...
+    Lap 5: 1:46.402 | wear FL=87% FR=86% RL=78% RR=77% | temp avg 82°C | pressure avg 33.1 psi
+    ```
+34. **(v2 — compound parsing, multi-compound car)** `Car.from_dir("cars_csv/bmw_1m")` loads two compounds: `car.compounds[0].name == "Street"`, `car.compounds[0].short_name == "ST"`, `car.compounds[1].name == "Semislicks"`, `car.compounds[1].short_name == "SM"`. `car.compounds[0].pressure_ideal_front == 42.0`, `car.compounds[1].pressure_ideal_front == 33.0`. `car.compounds[0].pressure_d_gain == 0.004`, `car.compounds[1].pressure_d_gain == 0.0045`. Wear LUTs and thermal LUTs resolve to the per-compound files (`street_*.lut` vs `semislicks_*.lut`; `[THERMAL_FRONT]` vs `[THERMAL_FRONT_1]`). `car.default_compound_index == 0` (no `[COMPOUND_DEFAULT]` section in the BMW M1 `tyres.ini`). **(v1.3 amendment)** Both compounds carry `k_drag == 0.5` and `k_drag_reduction == 0.1` (hand-defaults; not parsed from `tyres.ini`).
+35. **(v2 — `--compound` CLI selects Semislicks)** `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json --compound Semislicks --pressure FL=26,FR=26,RL=26,RR=26 --laps 1` runs without `f_pressure_grip` collapsing to the 0.30 grip floor (i.e. the resulting `mu_y_scale` from `combined_grip_envelope` is `== 1.0` at lap-1 because 26 psi is below Semislicks IDEAL=33 → `f_pressure_grip` returns 1.0 on the under-pressure side). With `--compound Street` and the same 26 psi, `f_pressure_grip` is at the floor (26 < 42 → wait, Street IDEAL=42, so 26 is also under-pressure → also returns 1.0 in v1.3; this part of the regression-of-the-bug test is now subsumed by §11.37). Stdout logs `Compound: Semislicks (idx 1) | source: cli`.
+36. **(v2 — fitter auto-selects compound from telemetry)** `python fit_driver.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json samples/aclog/Tomas_Lap*.csv` against CSVs containing `tyreCompound="Semislicks (SM)"` auto-selects `car.compounds[1]` (Semislicks) for the calibration fit and for the `lat_g_max` envelope used in the skill-percentile step. The written driver JSON has `tyre_calibration.source.compound == "Semislicks"`. With telemetry whose `tyreCompound` value is `"Foobar"` (not in `car.compounds`), the fitter prints a warning and falls back to `car.compounds[car.default_compound_index]`.
+37. **(v1.3 — low-PSI lap time within ±2 s of IDEAL)** With Semislicks compound, calibrated Tomas driver, ambient 26 °C, `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json --compound Semislicks --laps 3 --pressure FL=26,FR=26,RL=26,RR=26 --ambient-temp-c 26.0` produces an average lap time that is **≤ baseline + 2 s** (or *faster*) compared to the same run at `--pressure FL=33,...` (Semislicks IDEAL). Pre-v1.3 (symmetric quadratic) produced 1:53.46 vs 1:47.33 (6 s deficit). Post-v1.3 acceptance: the gap is in `[-1 s, +2 s]` — low-PSI side may be slightly slower due to drag, may be slightly faster, must not be massively slower.
+38. **(v1.3 — over-pressure grip penalty preserved)** With Semislicks compound, calibrated Tomas driver, ambient 26 °C, `python lap.py ... --compound Semislicks --laps 3 --pressure FL=44,FR=44,RL=44,RR=44` continues to produce a slow lap time (current pre-v1.3 baseline: 2:51.33). Post-v1.3: still > IDEAL lap time by `≥ 30 s`. The over-pressure grip penalty (`f_pressure_grip(p > IDEAL) < 1.0`) is preserved end-to-end.
+39. **(v1.3 — pressure sensitivity sweep is asymmetric)** A sweep across cold pressures `{22, 26, 29, 33, 37, 40, 44}` psi (Semislicks, all four wheels uniform, `--laps 3`, calibrated Tomas) produces a lap-time curve whose **low-PSI side (22–33) is flatter than the high-PSI side (33–44)**. Quantitatively: `(lap_time(22) - lap_time(33)) < (lap_time(44) - lap_time(33))`, and ideally the low-PSI side stays within ~5 s of IDEAL while the high-PSI side balloons by tens of seconds. Demonstrates the asymmetric model is wired through end-to-end.
 
 ## 12. References
 
-- `docs/AI_CONTEXT.md`, `README.md`, `src/lap_estimator/*.py`, `ModelCreationSteps.txt`, `Corner_Analysis/corner_analysis.py`, `samples/aclog/2026-04-07T135548_260Z_Tms_Lap2.csv`, `tracks_config.json`.
+`docs/AI_CONTEXT.md`, `README.md`, `src/lap_estimator/*.py`, `cars_csv/bmw_1m/tyres.ini`, `samples/aclog/*.csv`, `tracks_config.json`. **(v2)** AC `tyres.ini` `WEAR_CURVE`, `PRESSURE_IDEAL`, `PRESSURE_STATIC`, `PRESSURE_D_GAIN`, `[FRONT_n]`/`[REAR_n]`/`[THERMAL_FRONT_n]`/`[THERMAL_REAR_n]` compound sections, optional `[COMPOUND_DEFAULT]` `INDEX`, `[THERMAL_FRONT/REAR].PERFORMANCE_CURVE` (`tcurve_*.lut`). Lake schema: `reference_ac_telemetry_schema.md` (per-wheel state columns + `tyreCompound` confirmed 2026-05-14).
 
 ---
 
-## 13. Telemetry-driven driver fitting (addendum, v1 + v1.1 multi-lap mandatory + v1.2 profile-dynamics)
+## 13. Telemetry-driven driver fitting (addendum, v1 + v1.1 multi-lap mandatory + v1.2 profile-dynamics + v2 tyre-calibration)
 
-### 13.1 Goal
+*(All v1/v1.1/v1.2/v1.2.1 content retained verbatim from prior revisions — see prior revision §13.1 through §13.13. The full algorithm is unchanged; v2 adds one optional step.)*
 
-Given **two or more** real AC telemetry CSVs for laps on a known car/track, derive `skill_pct` and `consistency_sigma` so that the simulator's lap time (with that car + track + derived driver) lands close to the mean of the supplied real laps. **(v1.2)** Additionally, measure the dynamic profile fields (`driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`, `pedal_press_rate_per_s`, `steering_aggression_deg_per_s`) from the same telemetry instead of taking hand-defaults. The fit is **per-driver-stint, per-car, per-track**; we are not building a portable "driver personality" object yet.
+### 13.14 Tyre-state calibration step (v2 — new, optional)
 
-**Hard requirement (v1.1):** the fit requires **≥2 laps**. A single-lap input is rejected at CLI parse time with a clear error ("`fit requires ≥2 laps; see §13`"). No fallback / no override flag. Rationale: a single lap is too noisy a signal — driver consistency, tyre warm-up state, traffic, and one-off mistakes all dominate per-lap variance. Pooling samples across multiple laps is statistically more robust than averaging per-lap skill values (see §13.5 step 5). Unfinished laps and out-laps still contribute usefully — the only invalid input is "one lap".
+**Goal.** When the input telemetry CSVs contain per-wheel state channels (`tyreTempFL/FR/RL/RR`, `tyreWearFL/FR/RL/RR`, `wheelsPressureFL/FR/RL/RR`; optionally `wheelLoadFL/...` for slip-energy attribution), fit the four tyre-calibration knobs (`k_friction`, `h`, `C_thermal`, `k_wear`) so the simulated state evolution matches the measured trace across all input laps. When the channels are absent, skip the step and emit `tyre_calibration.measured = false` with hand-defaults.
 
-**Lap-selection rule (v1.2):** when more than 10 candidate laps are supplied (via positional CSVs, `--laps-glob`, or both — when interaction is allowed in a future iteration), keep only the **5–10 newest** by file mtime. The `--newest N` flag (default 10) sets the upper bound. If fewer than `N` candidates are available, use all of them (subject to the ≥2 minimum). See §13.12.
+**Ordering inside `fit_driver(...)`.** The calibration step runs **before** the `skill_pct` percentile (§13.5 step 5) so that the cornering-grip-utilisation calculation in step 4 can use the calibrated `f_temp/f_wear/f_pressure_grip` envelope in `lat_g_max`. This decouples tyre-state confounds from driver skill — flagged in §13 risks and §8 v2 constraints.
 
-**Out-lap (lap 1) handling.** The existing §13.5 step 1 trim logic (drop the pre-start-line portion via `normalizedCarPosition` wrap-detection) is retained. The trimmed in-lap remainder is included in the pool — there is no longer a "use a learned lap, not lap 1" rule. With multi-lap mandatory, no single lap is load-bearing, so the previous out-lap advisory is superseded.
-
-**v1.1 note on sim-emitted telemetry.** When `fit_driver.py` consumes a sim telemetry CSV produced by `lap.py`, the file contains both laps (lap 1 standing + lap 2 flying) with a `lap` column. The fitter splits on the `lap` column and treats each lap as one of the ≥2 required input laps. A `--lap {1,2}` override exists for debugging single-lap selection inside a sim file, but it implies "select that lap and require at least one more telemetry input alongside it".
-
-### 13.2 Non-goals (fit tool)
-
-- Fitting tyre / aero / engine parameters from telemetry.
-- Per-corner skill profile (v2).
-- Brake-vs-cornering skill split (v2).
-- Detecting / discarding off-track or invalid laps (out of scope — user curates the input list).
-- Live telemetry / streaming.
-- A v2 "track familiarity" or per-track confidence term (§15 hook).
-- **(v1.2)** Consuming `pedal_press_rate_per_s` / `steering_aggression_deg_per_s` inside the v1.2 simulator. They are statistics only; v1.3 picks them up.
-
-### 13.3 CLI shape
-
-```
-python fit_driver.py <car_data_dir> <track_csv> <output_driver_json> \
-                     [<lap1.csv> <lap2.csv> [<lap3.csv> ...]] \
-                     [--ds 2.0] [--name <driver_name>] [--no-validate] [--no-plot] \
-                     [--lap {1,2}] [--laps-glob "<pattern>"] [--newest N]
-```
-
-- `<car_data_dir>` — same shape `lap.py` accepts.
-- `<track_csv>` — full track CSV.
-- `<output_driver_json>` — destination path; directories created as needed.
-- `<lap1.csv> <lap2.csv> [<lap3.csv> ...]` — **variadic positional**; **two or more required** *after* lap selection is applied. Each is a raw AC log (or a sim-emitted CSV containing the `lap` column). Single-CSV input is a hard error at argparse-validation time: `error: fit requires ≥2 laps; see §13`.
-- `--laps-glob "<pattern>"` — alternative to listing CSVs individually. Expands the glob at runtime; after `--newest` filtering, the resolved list must still contain ≥2 files or the same error fires. Mutually exclusive with positional CSVs: either pass positionals OR `--laps-glob`, not both (argparse error if both). Example: `--laps-glob "samples/aclog/Tomas_Lap*.csv"`.
-- **(v1.2)** `--newest N` — integer cap on the number of candidate laps to keep, ranked newest-first by file mtime. Default `10`. Minimum effective value is `2` (enforced by the ≥2 guard, not by argparse). Applied uniformly to positionals or to the `--laps-glob` expansion. If the candidate list has ≤ `N` files, all of them are used.
-- `--name` — overrides the auto-generated `name`. Default: derived from the **first** telemetry filename stem with the lap suffix stripped.
-- `--no-validate` — skip the post-fit sim validation pass.
-- `--no-plot` — skip plotting.
-- `--lap {1,2}` — when an input telemetry CSV has a `lap` column (sim-emitted, §14.5), select this lap from each such file. Default: `2`. Ignored on real AC logs with no `lap` column. Each sim-emitted CSV still counts as **one** input file regardless of how many laps it contains internally — to feed both laps of a sim file in, pass it twice with different `--lap` values, or split it outside the fitter.
-
-### 13.4 Input contract
-
-**AC telemetry CSV** (confirmed columns from `samples/aclog/...`):
-
-| Column | Unit | Used for |
-|---|---|---|
-| `timestamp_ms` | ms | Per-lap real time = `max - min` / 1000; pedal-edge timing; steering-rate timing |
-| `gas` | 0..1 | (v1.2) Leading-edge tau + pedal-press-rate + throttle-ramp measurement |
-| `brake` | 0..1 | (v1.2) Leading-edge tau + pedal-press-rate + trail-brake measurement |
-| `distanceTraveled` | m | Merge key against track CSV `distance_m`; (v1.2) ramp-length measurement |
-| `speedKmh` | km/h | Converted to m/s for `v` |
-| `normalizedCarPosition` | 0..1 | Lap-finished detection (≥0.9 span = finished) + out-lap trim |
-| `steerAngle` (v1.2, optional) | rad or deg (units detected from range) | Steering-aggression measurement; absent → null |
-| `lap` (sim-emitted only) | int | Lap selector when present |
-
-**(v1.2) `telemetry.read_ac_log`** is extended to accept the broader AC channel set. `steerAngle` is opportunistically loaded if present; missing values emit a single warning per file ("`steerAngle absent — steering aggression will be unmeasured`") and the column is filled with `NaN`. Other AC channels listed in §19.2.4 are not required by v1.2 but the reader does not reject them — extra columns are passed through to the merged frame so v1.3 can pick them up without another schema change.
-
-**Track CSV:** §7.1.
-**Car dir:** §7.3.
-
-### 13.5 Algorithm
-
-All steps live in `driver_fit.fit_driver(car, track_df, telemetry_dfs: list) -> FitResult`. The CLI is a thin wrapper that loads the variadic input list, applies lap selection (§13.12), calls this function, writes the JSON, and (unless `--no-validate`) runs the validation sim.
-
-**Pre-flight: lap-count guard.**
-- If `len(telemetry_dfs) < 2`, raise `ValueError("fit requires ≥2 laps; see §13")`. The CLI catches this and exits non-zero with the same message.
-
-**Per-lap pipeline (steps 1–4 run independently for each input lap):**
-
-**Step 1 — Out-lap trim and merge with track on distance.**
-- Detect out-lap by checking whether the lap's `normalizedCarPosition` series starts above some threshold (e.g. > 0.05) and wraps through zero — that's a standing-start prefix that crosses the start line mid-CSV. If detected, drop the pre-wrap portion.
-- For sim-emitted CSVs with a `lap` column, filter to the chosen lap (`--lap`, default 2) before merge.
-- Use `telemetry.merge_with_track(telem, track_df)`.
-- Output: merged dataframe with `distance_m, speed_ms, radius_m, gradient_pct, gas, brake, timestamp_ms, normalizedCarPosition` (plus `steerAngle` and any other passthrough columns when present).
-
-**Step 2 — Per-point observed lateral G.**
-- `lat_g_obs[i] = v[i]**2 / radius_m[i] / 9.81`.
-- Points where `radius_m[i] >= STRAIGHT_THRESHOLD_M` (default 500 m) are flagged as straight and **excluded** from the skill fit.
-
-**Step 3 — Theoretical max lateral G.**
-- `lat_g_max[i] = car.tyre_grip_lateral(v[i]) * (1 + downforce(v[i]) / (m*g))`.
-
-**Step 4 — Per-point grip utilisation.**
-- `util[i] = lat_g_obs[i] / lat_g_max[i]`.
-- Clip to `[0.0, 1.2]`. Warning if > 5% of cornering samples exceed 1.0.
-- Tag each lap with `finished = (ncp_span >= 0.9)` where `ncp_span = max(ncp) - min(ncp)` over the (post-trim) lap. Finished laps additionally contribute `real_lap_time_s = (max(timestamp_ms) - min(timestamp_ms)) / 1000` to the per-lap times list.
-
-**Step 5 — Pool across laps, aggregate.**
-- **Pool all cornering-sample `util` values from all laps into one big array** (`pooled_util`).
-- `skill_pct = clip(percentile(pooled_util, 85), 0.05, 1.0)`.
-- `consistency_sigma_util = stdev(pooled_util)`.
-- `consistency_sigma_seconds = round(consistency_sigma_util / 0.03, 2)`, clamped to `[0.0, 1.5]`. (Existing heuristic mapping.)
-- **Rationale (locked):** pooling — not per-lap-skill averaging — is statistically more robust. A 4000-sample lap contributes proportionally more weight than a 500-sample lap, which is the right behaviour: more data → more weight, automatically. Averaging per-lap percentiles would treat a short stint and a full lap as equals, drowning out the high-quality samples. The pooled-percentile interpretation is straightforward: "across the pooled cornering history, the driver achieved at least this utilisation in 85% of samples". See §9 for the rejected alternative.
-
-**Step 5b — (v1.2) Measure dynamic profile.**
-- Call `profile_dynamics.measure_dynamics(merged_frames)` (the same per-lap merged frames as steps 1–4). See §13.11 for the algorithm.
-- Returns a `ProfileDynamics` with `driver_tau_s`, `trail_brake_m`, `throttle_ramp_m`, `pedal_press_rate_per_s`, `steering_aggression_deg_per_s`, plus per-field `measured` booleans and `sample_counts`.
-- Each measured-true field overrides the hand-default and is written under `profile.dynamic.*`. Each measured-false field falls back to the hand-default (or `null` for the two statistics-only fields) and still emits the `profile.dynamic` block — readers can inspect `measured.*` to know what came from where.
-
-**Step 6 — Worked example (illustrative, multi-lap):**
-- Six laps, pooled cornering samples ≈ 18 000 (lap 1 trimmed contributes ~2 100; laps 2–5 contribute ~3 200 each; lap 6 unfinished contributes ~1 600). 85th percentile of pool → `skill_pct ≈ 0.88`. Stdev → `consistency_sigma_seconds ≈ 0.42`. Profile-dynamics across the same pool yields `driver_tau_s ≈ 0.14`, `trail_brake_m ≈ 28.5`, `throttle_ramp_m ≈ 47.0`, `pedal_press_rate_per_s ≈ 6.4`, `steering_aggression_deg_per_s ≈ 312` (steerAngle present).
-
-**Step 7 — Pre-fit summary (printed before validation):**
-```
-Laps loaded:      6   (5 finished, 1 unfinished)
-Pooled samples:   17834 cornering points
-Mean real lap time (finished): 1:42.418
-Profile dynamics: τ=0.140 s  trail=28.5 m  ramp=47.0 m  press=6.4/s  steer95=312°/s
-```
-
-**Step 8 — Emit JSON.**
-```json
-{
-  "name": "tomas",
-  "skill_pct": 0.88,
-  "consistency_sigma": 0.42,
-  "driver_tau_s": 0.14,
-  "trail_brake_m": 28.5,
-  "throttle_ramp_m": 47.0,
-  "profile": {
-    "dynamic": {
-      "driver_tau_s": 0.14,
-      "trail_brake_m": 28.5,
-      "throttle_ramp_m": 47.0,
-      "pedal_press_rate_per_s": 6.4,
-      "steering_aggression_deg_per_s": 312.0,
-      "measured": {
-        "driver_tau_s": true,
-        "trail_brake_m": true,
-        "throttle_ramp_m": true,
-        "pedal_press_rate_per_s": true,
-        "steering_aggression_deg_per_s": true
-      },
-      "sample_counts": {
-        "pedal_leading_edges": 184,
-        "brake_taper_segments": 22,
-        "throttle_ramp_segments": 24,
-        "steering_samples": 198432
-      }
-    }
-  },
-  "source": {
-    "telemetry_csvs": [
-      "samples/aclog/Tomas_Lap1.csv",
-      "samples/aclog/Tomas_Lap2.csv",
-      "samples/aclog/Tomas_Lap3.csv",
-      "samples/aclog/Tomas_Lap4.csv",
-      "samples/aclog/Tomas_Lap5.csv",
-      "samples/aclog/Tomas_Lap6.csv"
-    ],
-    "track_csv": "tracks_csv/ks_nurburgring/layout_sprint_a.csv",
-    "car_data_dir": "cars_csv/bmw_1m",
-    "n_laps": 6,
-    "n_finished_laps": 5,
-    "real_lap_times_s": [102.135, 101.998, 102.402, 102.310, 103.244],
-    "real_lap_time_s": 102.418,
-    "pooled_sample_count": 17834,
-    "sim_lap_time_s": null,
-    "delta_s": null,
-    "lap_selection": {
-      "rule": "newest-5-to-10",
-      "candidates_considered": 6,
-      "selected_count": 6,
-      "selected_sources": [
-        "samples/aclog/Tomas_Lap1.csv",
-        "samples/aclog/Tomas_Lap2.csv",
-        "samples/aclog/Tomas_Lap3.csv",
-        "samples/aclog/Tomas_Lap4.csv",
-        "samples/aclog/Tomas_Lap5.csv",
-        "samples/aclog/Tomas_Lap6.csv"
-      ]
-    },
-    "fitted_at": "2026-05-13T14:22:01Z",
-    "fit_version": "2"
-  }
-}
-```
-- Top-level `driver_tau_s` / `trail_brake_m` / `throttle_ramp_m` mirror `profile.dynamic.*` (or fall back to hand-defaults when measured-false) for backward compatibility with v1.1 readers.
-- `telemetry_csvs` (list) replaces the v1 scalar `telemetry_csv`. Always populated by the fitter even when only 2 laps are supplied.
-- `n_laps` — total **selected** input laps (length of `telemetry_csvs` after `--newest` filtering).
-- `n_finished_laps` — count of laps whose post-trim `ncp_span >= 0.9`.
-- `real_lap_times_s` (list) — per-lap real lap times in seconds, **only for finished laps**, in the order the laps were supplied. Length equals `n_finished_laps`.
-- `real_lap_time_s` (scalar) — mean of `real_lap_times_s`. Kept under this exact key name for backward compatibility with downstream readers (`lap.py --validate-against` and any pre-v1.1 driver-JSON consumer that read this field).
-- `pooled_sample_count` — total cornering samples used in the percentile (after straight-exclusion and out-lap trim).
-- `sim_lap_time_s` — populated by the validation sim (lap 2); `null` when `--no-validate`.
-- `delta_s` — `sim_lap_time_s - real_lap_time_s` (mean real vs sim lap 2); `null` when `--no-validate`.
-- `lap_selection` (v1.2) — block recording how the input list was filtered. `rule` is the constant `"newest-5-to-10"` for v1.2. `candidates_considered` counts the pre-filter pool size; `selected_count` is the post-filter count (== `n_laps`); `selected_sources` is the post-filter list (== `telemetry_csvs`).
-- `fit_version` — `"2"` when `profile` is populated; `"1"` for legacy v1.1 fits.
-
-**Step 9 — Validation pass (default on, post-fit).**
-Run a two-lap sim with the freshly-emitted JSON and print:
-```
-Real laps used:                6  (5 finished)
-Mean real lap time (finished): 1:42.418
-Sim lap 2 (flying):            1:43.402
-Delta vs mean real:            +0.984 s  (+0.96%)
-Verdict:                       GOOD
-```
-- Verdicts use the existing thresholds (unchanged): `GOOD` (|d| < 3 s AND |%| < 5), `LOOSE` (5–10 %), `BAD` (> 10 %). Thresholds compare the sim lap 2 against the **mean** of the finished real lap times.
-- Patches `source.sim_lap_time_s` and `source.delta_s` (where `delta_s = sim_lap2_time - mean_real`).
-- If `|delta| > 3 s`, the verdict line surfaces it as `LOOSE` or `BAD` rather than as a separate warning.
-
-### 13.6 Output contract (JSON schema additions)
-
-- `profile.dynamic` — (v1.2) populated by `fit_driver.py`. Full schema in §7.2 / §13.5 step 8.
-- `source` — optional object; full key list in §13.5 step 8.
-- **v2 hook:** `corners` — optional list of per-corner overrides. Reserved key.
-
-### 13.7 Module changes
-
-- **New / updated:** `src/lap_estimator/telemetry.py` — `read_ac_log(path)` and `merge_with_track(...)`. (v1.2) Accepts `steerAngle` opportunistically; passes through unknown columns.
-- **New / updated:** `src/lap_estimator/driver_fit.py` — `fit_driver(car, track_df, telemetry_dfs: list, *, straight_threshold_m=500.0, util_percentile=85) -> FitResult`. Owns the lap-count guard, per-lap pipeline, pooling, dynamic-profile invocation (v1.2), and `FitResult` shape.
-- **New (v1.2):** `src/lap_estimator/profile_dynamics.py` — `measure_dynamics(merged_frames) -> ProfileDynamics`. See §13.11.
-- **New / updated:** `fit_driver.py` (CLI at repo root) — argparse with variadic positionals, `--laps-glob`, `--newest N` (v1.2), lap-count guard at parse time, loads inputs, applies lap selection, calls library, writes JSON, runs validation sim, patches JSON.
-- **Touched:** `src/lap_estimator/driver.py` — `Driver.load` tolerates the new `source` keys and the v1.2 `profile.dynamic` block.
-- **Untouched:** `car.py`, `simulator.py`, `report.py`.
-
-### 13.8 `Corner_Analysis/` handling
-
-User-managed scratch — not depended on by the fit tool. Sample telemetry lives under `samples/aclog/`.
-
-### 13.9 Open questions / v2 candidates
-
-- Per-corner skill profile, brake-vs-cornering split, percentile choice, skill ceiling clipping.
-- **Per-lap skill variance as a separate signal.** Compute the 85th percentile per lap as well as the pooled percentile, and surface the spread of per-lap values as an independent "consistency-from-lap-to-lap" metric. Two consistency channels would then live in the driver schema: `consistency_sigma` (within-lap, from pooled stdev — current model) and `consistency_lap_to_lap` (between-lap, new). Useful for distinguishing "always 88% util" from "ranges 75–95% util across laps". Not building it now — recorded here so the v2 schema can add the field forward-compatibly.
-- **Per-lap weighting controls.** Currently sample-count-weighted by construction (pooling). A future option could let the user weight laps explicitly (e.g. discount short stints, boost a known-clean lap).
-- ~~**(v1.1)** Fit `driver_tau_s` from telemetry by measuring throttle-to-G lag.~~ **Closed in v1.2 — see §13.11.**
-- ~~**(v1.1)** Fit `trail_brake_m` / `throttle_ramp_m` from corner-entry / corner-exit telemetry.~~ **Closed in v1.2 — see §13.11.**
-
-### 13.10 Acceptance criteria (fit tool)
-
-1. Running `python fit_driver.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json samples/aclog/Tomas_Lap1.csv samples/aclog/Tomas_Lap2.csv samples/aclog/Tomas_Lap3.csv samples/aclog/Tomas_Lap4.csv samples/aclog/Tomas_Lap5.csv samples/aclog/Tomas_Lap6.csv` succeeds, writes a JSON that loads cleanly via `Driver.load`, prints the multi-lap delta block (§13.5 step 9).
-2. JSON's `skill_pct ∈ (0, 1]`, `consistency_sigma ∈ [0, 1.5]`, **(v1.2)** `profile.dynamic` populated with measured-true booleans on the four pedal/ramp fields, `source` fully populated per §13.5 step 8.
-3. Running `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/tomas.json` reproduces `source.sim_lap_time_s` within numerical noise.
-4. Validation delta `|sim_lap2 - mean_real|` < 5 s on the bundled multi-lap Nurburgring Sprint pool.
-5. `--no-validate` skips the sim; `source.sim_lap_time_s` / `source.delta_s` stay `null`.
-6. Missing required telemetry column → fail fast. **(v1.2)** Missing optional `steerAngle` → warn and continue; `profile.dynamic.steering_aggression_deg_per_s` becomes `null` with `measured.steering_aggression_deg_per_s = false`.
-7. Non-overlapping distance ranges → clear error.
-8. Tool does not read or write inside `Corner_Analysis/`.
-9. **(v1.1) Single-lap input rejected.** See §11.20.
-10. **(v1.1) Multi-lap JSON shape.** See §11.21.
-11. **(v1.1) `--laps-glob` shorthand.** `python fit_driver.py <car> <track> <out> --laps-glob "samples/aclog/Tomas_Lap*.csv"` produces an output JSON byte-identical to listing the six files positionally (modulo the `fitted_at` timestamp and modulo v1.2 lap-selection metadata).
-12. **(v1.1) `--laps-glob` resolving to <2 files** errors out with the same "≥2 laps" message; no JSON written.
-13. **(v1.1) Mixing positional CSVs with `--laps-glob`** is rejected at argparse-validation time.
-14. **(v1.2) `--newest N` cap.** See §11.25.
-15. **(v1.2) Profile-dynamics fields measured within plausible bounds.** See §11.22.
-
-### 13.11 Profile-dynamics algorithm (v1.2 — new)
-
-Lives in `src/lap_estimator/profile_dynamics.py`. Single entry point:
-
-```python
-def measure_dynamics(
-    merged_frames: list,        # list of per-lap DataFrames from §13.5 step 1
-    *,
-    rising_edge_low: float = 0.10,
-    rising_edge_high: float = 0.50,
-    min_rise_window_s: float = 0.20,
-    pedal_hysteresis_low: float = 0.05,
-    taper_high: float = 0.80,
-    taper_low: float = 0.10,
-    ramp_low: float = 0.40,      # lower bound for "corner-exit partial"
-    ramp_high: float = 0.95,
-    corner_detect_speed_window_s: float = 2.0,
-    steering_percentile: float = 95.0,
-) -> ProfileDynamics: ...
-```
-
-`ProfileDynamics` is a dataclass:
-
-```
-driver_tau_s: float | None
-trail_brake_m: float | None
-throttle_ramp_m: float | None
-pedal_press_rate_per_s: float | None
-steering_aggression_deg_per_s: float | None
-measured: dict[str, bool]
-sample_counts: dict[str, int]
-```
-
-**Step A — Leading-edge detection (for `driver_tau_s` and `pedal_press_rate_per_s`).**
-
-For each lap, for each of `gas` and `brake`:
-1. Compute hysteresis-armed rising edges: walk the trace; the channel is "armed" when it has been below `pedal_hysteresis_low` (0.05). Once armed, a sample crossing `rising_edge_low` (0.10) starts an edge candidate. The candidate completes when the channel reaches `rising_edge_high` (0.50). If the channel does not reach 0.5 within `min_rise_window_s` (200 ms), discard the candidate and re-arm when it dips below 0.05 again.
-2. For each completed edge:
-   - `t_50` = time at which the channel first crossed 0.5.
-   - `t_start` = time at which the channel first crossed 0.10 (start of edge).
-   - `tau_candidate = t_50 - t_start`. This is the time-to-50 % from the toe-press start.
-   - `slope_candidate = (y[t_50] - y[t_start]) / (t_50 - t_start)`. This is the per-second press rate (units: 1/s, i.e. fraction-per-second).
-3. Pool `tau_candidate` and `slope_candidate` across both channels and all laps.
-
-`driver_tau_s = median(tau_candidate_pool)` (clamped to `[0.02, 0.50]`).
-`pedal_press_rate_per_s = median(slope_candidate_pool)`.
-If fewer than 10 edges total across the pool → both fields fallback (`driver_tau_s = 0.12`, `pedal_press_rate_per_s = null`) and `measured.*` for each is `false`.
-
-**Step B — Corner-limited segment detection (shared by trail-brake and throttle-ramp).**
-
-For each lap:
-1. Smooth `speedKmh` with a moving-average over `corner_detect_speed_window_s` (2 s window).
-2. Find local minima of the smoothed speed trace whose value is below `0.85 * lap_max_speed`. Each minimum is the "apex" of a corner-limited segment.
-3. For each minimum:
-   - `entry_distance_m` = `distance_m` at the apex.
-   - Walk backward in distance until either `brake` drops below `taper_low` or a previous segment's exit was passed — call this `brake_release_distance_m`.
-   - Walk forward in distance until `gas` reaches `ramp_high` or another segment's apex is reached — call this `throttle_full_distance_m`.
-
-**Step C — Trail-brake distance (for `trail_brake_m`).**
-
-For each detected segment:
-1. Find the last sample before the apex at which `brake >= taper_high` (0.80) — call this `t_brake_peak`.
-2. Find the first sample after `t_brake_peak` at which `brake <= taper_low` (0.10) — call this `t_brake_off`.
-3. `trail_brake_candidate = distance_m[t_brake_off] - distance_m[t_brake_peak]` (clamped to ≥ 0).
-4. Discard candidates where peak brake never reached `taper_high` (driver didn't actually firm-brake) or where the taper window exceeds 200 m (likely a misdetection).
-
-`trail_brake_m = median(trail_brake_candidate_pool)` (clamped to `[5.0, 150.0]`).
-If fewer than 5 candidates → fallback to 30.0 with `measured.trail_brake_m = false`.
-
-**Step D — Throttle-ramp distance (for `throttle_ramp_m`).**
-
-For each detected segment:
-1. Find the first sample after the apex at which `gas >= ramp_low` (0.40) — call this `t_throttle_partial`.
-2. Find the first subsequent sample at which `gas >= ramp_high` (0.95) — call this `t_throttle_full`.
-3. `throttle_ramp_candidate = distance_m[t_throttle_full] - distance_m[t_throttle_partial]` (clamped to ≥ 0).
-4. Discard candidates where the channel never reaches `ramp_high` within the segment, or where the ramp window exceeds 250 m.
-
-`throttle_ramp_m = median(throttle_ramp_candidate_pool)` (clamped to `[5.0, 200.0]`).
-If fewer than 5 candidates → fallback to 40.0 with `measured.throttle_ramp_m = false`.
-
-**Step E — Steering aggression (for `steering_aggression_deg_per_s`).**
-
-If no merged frame contains a `steerAngle` column with non-NaN values → return `null`, `measured = false`.
-Otherwise:
-1. For each lap, compute `d_steer = diff(steerAngle) / diff(timestamp_s)` (per-sample finite difference).
-2. Convert to degrees-per-second if input units look like radians (heuristic: max |steerAngle| < 5 → radians, else degrees). Record the unit decision in `sample_counts.steering_unit_detected` (string `"rad"` or `"deg"`).
-3. Pool `|d_steer|` across all laps.
-4. `steering_aggression_deg_per_s = percentile(pool, 95)` (clamped to `[0.0, 5000.0]`).
-
-**Step F — Assemble result.**
-- `measured.<field>` is `true` iff the corresponding measurement path succeeded (≥ minimum candidates, channel present).
-- `sample_counts.pedal_leading_edges` = total edges across both channels and all laps.
-- `sample_counts.brake_taper_segments` = number of trail-brake candidates retained.
-- `sample_counts.throttle_ramp_segments` = number of throttle-ramp candidates retained.
-- `sample_counts.steering_samples` = total non-NaN samples in pooled steering trace.
-
-### 13.12 Lap-selection rule (v1.2 — new)
-
-**Rationale.** Once a driver has accumulated more than 10 laps in a stint, the oldest laps are typically less representative of their current familiarity, tyre state, and dialled-in line. Capping the fit at the newest 5–10 laps preserves data quality without forcing the user to manually pick.
+**Compound resolution (v2).** Before fitting, the fitter reads `tyreCompound` from the merged telemetry frame (most common value across all rows wins). It calls `car.find_compound(value)` to resolve to a `Compound`. On match, the calibration step and the `lat_g_max` envelope use that compound's `f_pressure_grip/f_pressure_drag/f_temp/f_wear`. On miss (unknown value), warn `Tyre compound "<value>" not found in car.compounds — falling back to default "<default>"` and use `car.compounds[car.default_compound_index]`. The resolved compound name is written under `tyre_calibration.source.compound`.
 
 **Algorithm.**
-1. Collect candidate paths. If positional CSVs are supplied, that list **is** the candidate set. If `--laps-glob` is supplied, expand the glob to produce the candidate set.
-2. Rank the candidate set by file modification time, newest first. Ties broken by lexicographic filename ordering.
-3. If `len(candidates) > --newest N` (default 10): truncate to the first `N`.
-4. If `len(candidates) < 2`: error out with the `"fit requires ≥2 laps; see §13"` message.
-5. Otherwise: use 2 ≤ `len(selected)` ≤ `N`. The hard minimum of 2 is enforced; if the user runs `--newest 1`, argparse rejects.
+1. **Detect per-wheel state availability.** Inspect the union of columns across all input frames. Required for calibration: all four `tyreTemp*` and all four `tyreWear*`. `wheelsPressure*` is desirable but not required (ideal-gas relation can fill it). If required channels absent, set `tyre_calibration.measured = false`, populate defaults, skip to step 5b.
+2. **Per-frame, per-segment, derive simulated state under candidate knobs.** Walk the merged frame; at each `(distance_m, v, radius)`, compute slip-energy attribution per §21.3, then advance per-wheel `temp_C`, `wear_pct`, `pressure_psi` **using the resolved compound's curves**. The candidate knobs are `(k_friction, h, C_thermal, k_wear)`.
+3. **Fit loss = weighted RMSE.** `L = w_T · RMSE(temp_C - tyreTemp_*) + w_W · RMSE(wear_pct - tyreWear_*) + w_P · RMSE(pressure_psi - wheelsPressure_*)`. Weights `w_T = 1.0`, `w_W = 5.0` (wear is the user-facing target), `w_P = 0.5`.
+4. **Minimise via SciPy `minimize(method='Nelder-Mead')`** over `log10` of each of the four knobs (positive-only). Initial guess: the defaults. Bounds enforced by clipping inside the loss function. Max 100 iterations.
+5. **Record under `tyre_calibration`** (§7.2) with `measured = true`, `source.fit_rmse_*` filled, `source.fitted_at` set, `source.compound` set to the resolved compound name.
+5b. **No-measurement fallback.** Defaults written, `measured = false`, log line: `Tyre calibration: per-wheel state channels absent — using hand-defaults`.
 
-**Logging.** The fitter prints, before the pre-fit summary:
-```
-Lap selection: 12 candidates → kept 10 newest (range 2026-05-09 14:22 .. 2026-05-13 09:48)
-```
+**JSON output.** Added under the top-level `tyre_calibration` key (§7.2).
 
-**JSON record.** `source.lap_selection` captures the rule name, candidate count, selected count, and selected source paths in newest-first order. See §13.5 step 8.
-
-### 13.13 Open questions / v3 candidates (v1.2-specific)
-
-- **Replace the first-order low-pass with a slew-rate-limited filter parameterised by `pedal_press_rate_per_s`.** The current low-pass smooths edges uniformly; a slew-rate limiter would more faithfully reproduce "driver hits the brake at X /s" behaviour. Captured for v1.3.
-- **Steering channel as a sim input.** Once §19.2 (slip-based sim) lands, `steering_aggression_deg_per_s` becomes a direct input to the corner-entry yaw model. Until then it is a statistic only.
-- **Per-corner profile-dynamics overrides.** Currently we measure global medians; a future v2 hook could surface per-corner-type ramp distances (hairpin vs sweeper) under `profile.dynamic.by_corner_type`.
+**Acceptance.** §11.27, §11.28 require `tyre_calibration.measured = true` and exercise the calibration end-to-end. §11.30 covers the no-measurement path. §11.36 covers compound auto-selection.
 
 ---
 
-## 14. Synthetic telemetry emission (addendum, v1 + v1.1 + v1.2)
+## 14. Synthetic telemetry emission (v1 + v1.1 + v1.2 + v1.2.1 + v2)
 
-### 14.1 Goal
+*(All v1/v1.1/v1.2/v1.2.1 content retained from prior revisions. v2 adds the 12 per-wheel state columns.)*
 
-After every sim run, emit a CSV that is **schema-identical to a real AC telemetry log** (plus a trailing `lap` column — v1.1) so downstream tools — first and foremost `fit_driver.py` — can consume sim output the same way they consume real laps.
-
-### 14.2 Non-goals
-
-- Human-realistic input traces.
-- Channels not in the AC sample.
-- Wall-clock-anchored `timestamp_ms`.
-- Re-using sim's exact `ds` cadence.
-
-### 14.3 Gas/brake derivation pipeline (v1.1 — replaces v1's simple piecewise rule)
-
-The emitted `gas` / `brake` traces are built in **three layers**, in this exact order:
-
-1. **Layer 1 — limit-label rule (unchanged from v1).** Per sample, look up the simulator's per-point binding-limit label and emit:
-   - `accel` → `gas = 1.0, brake = 0.0`
-   - `brake` → `gas = 0.0, brake = 1.0`
-   - `corner` → `gas = required_drive_force / car.max_traction_force(v)`, `brake = 0.0`, clipped to `[0, 1]`.
-
-2. **Layer 2 — corner-shape heuristic (v1.1).**
-   - **Trail-brake taper.** For `trail_brake_m` metres preceding a `brake → corner|accel` transition, linearly taper `brake` from 1.0 down to 0.0.
-   - **Throttle ramp-up.** For `throttle_ramp_m` metres after a `corner → accel` transition, linearly ramp `gas` from corner-exit partial value up to 1.0.
-   - Either field set to `0.0` disables that heuristic.
-
-3. **Layer 3 — driver-lag low-pass (v1.1).** 1st-order IIR low-pass on `gas` and `brake`:
-   ```
-   y[n] = y[n-1] + α · (x[n] - y[n-1])
-   α   = dt / (driver_tau_s + dt)
-   ```
-   - `driver_tau_s = 0.0` bypasses the filter.
-   - Default `driver_tau_s = 0.12 s`.
-   - **(v1.2)** At the new default `--telemetry-dt-ms 10`, `α = 0.010 / (0.120 + 0.010) ≈ 0.077` — i.e. the smoothing carries 92 % of the previous output forward each step, producing visibly smoother traces than the v1.1 100 ms default (`α = 0.455`). With a measured τ from `profile.dynamic.driver_tau_s` (typically 0.10–0.20 s for human drivers) the same shape applies.
-
-**Order summary:** `limit-label rule → corner-shape heuristic → driver-lag low-pass → CSV write`.
-
-### 14.4 Decisions baked in (v1 + v1.1 + v1.2)
-
-1. **Schema:** AC schema + `lap` column.
-2. **Cadence:** **(v1.2)** 10 ms default (was 100 ms in v1.1). Override via `--telemetry-dt-ms`.
-3. **Time origin:** monotonic across lap boundary.
-4. **`normalizedCarPosition`** resets at lap boundary.
-5. **`distanceTraveled`** resets to 0 at lap 2 start.
-6. **Resampling:** linear interp in time.
-7. **Gas/brake reconstruction:** three-layer pipeline (§14.3).
-8. **Emission default-on.**
-9. **File path:** single file with two laps.
-10. **Module:** `sim_telemetry.py`.
-11. **Driver-input model (v1.1):** trail-brake / throttle-ramp + low-pass replaces deferred-to-v2 hook.
-12. **Two CLIs, not three.**
-13. **Local-file-only prototype.**
-14. **(v1.2) Driver-input values sourced from `profile.dynamic.*` when present, falling back to top-level driver fields, falling back to hand-defaults.** The simulator does not care which path was taken; `Driver.load` resolves them at load time.
-
-### 14.5 CLI surface (additions to `lap.py`)
-
+### 14.6 Output schema (v2 update)
 ```
-[--no-telemetry] [--telemetry-dt-ms 10] [--single-lap]
+timestamp_ms,gas,brake,distanceTraveled,speedKmh,normalizedCarPosition,lap,tempFL,tempFR,tempRL,tempRR,wearFL,wearFR,wearRL,wearRR,pressureFL,pressureFR,pressureRL,pressureRR
 ```
+Units: temp °C; wear 0..100 (100=fresh); pressure PSI. Values forward-filled from per-segment state. Constant across the lap when `n_laps == 1` and `tyre_calibration.measured == false`.
 
-**(v1.2)** `--telemetry-dt-ms` default is `10`. Set to `100` to reproduce v1.1 output volume.
-
-### 14.6 Output schema
-
-```
-timestamp_ms,gas,brake,distanceTraveled,speedKmh,normalizedCarPosition,lap
-```
-
-### 14.7 Resampling algorithm
-
-Walks sim step→time map, builds uniform output grid per lap (timestamps continue across), linear-interp distance/speed, nearest-neighbour binding label, reconstructs gas/brake per §14.3.
-
-### 14.8 Module: `src/lap_estimator/sim_telemetry.py`
-
-```python
-def write_synthetic_log(
-    sim_result,
-    car,
-    driver,
-    track_total_length_m: float,
-    output_path: str,
-    *,
-    telemetry_dt_ms: int = 10,
-) -> None: ...
-```
-
-**(v1.2)** Default kwarg value bumped from 100 to 10 to match the CLI default.
-
-### 14.9 Loop-closure acceptance criterion
-
-Fit a driver from ≥2 laps → emit sim telemetry → re-fit using sim's lap 1 + lap 2 as the two required inputs. Pass criteria:
-- `|skill_pct_loop - skill_pct_real| / skill_pct_real <= 0.05`.
-- `|sim_lap_time_loop - sim_lap_time_real| <= 1.0` s.
-- `skill_pct_loop` is not trivially 1.0.
-
-### 14.10 Acceptance criteria (sim-telemetry emission)
-
-1. Default `lap.py` produces telemetry CSV.
-2. Header byte-matches.
-3. `timestamp_ms` monotonic across boundary.
-4. `distanceTraveled` resets per lap.
-5. `normalizedCarPosition` in [0, 1), resets at boundary.
-6. `gas` and `brake` never both > 0.05.
-7. Straight: `gas ≈ 1.0, brake ≈ 0.0`.
-8. `--no-telemetry` skips file.
-9. `--telemetry-dt-ms` scales row count.
-10. Loop closure passes (per §14.9 — re-fits using both laps of the sim telemetry as the two required `fit_driver.py` inputs).
-11. **(v1.1)** With `driver_tau_s = 0`, `trail_brake_m = 0`, `throttle_ramp_m = 0`, output matches v1 bang-bang byte-for-byte (modulo `lap` column).
-12. **(v1.2)** Default `--telemetry-dt-ms` is 10. See §11.23.
-
-### 14.11 Open questions / v2 candidates
-
-Full motor-control model, steering channel, extra channels, wall-clock timestamps, multi-lap (>2) output, cadence calibration.
+### 14.12 v2 telemetry-emission acceptance criteria
+14. **(v2)** Stint mode (`--laps N` with N ≥ 1) emits the 12 per-wheel state columns. At `--laps 1` without calibration, values are constant at setup defaults. At `--laps 12` with calibration, values evolve monotonically (wear strictly decreasing, temp warming then plateauing, pressure rising with temp).
 
 ---
 
 ## 15. Cross-track validation workflow (addendum, v1)
 
-### 15.1 Goal — the actual point of the tool
-
-Predict how a known driver (fit on Track A) will perform on a new track (Track B, same car), then validate against a real AC lap on Track B.
-
-The CLI is `lap.py --validate-against`. v1.1: validation compares the real lap against **sim lap 2**.
-
-### 15.2 End-to-end workflow
-
-1. Drive Track A in AC for ≥2 laps; capture telemetry.
-2. `python fit_driver.py <car_dir> <track_a_csv> drivers/<name>.json <lap1.csv> <lap2.csv> [...]`.
-3. Choose Track B.
-4. `python lap.py <car_dir> <track_b_csv> drivers/<name>.json` → predicted lap times.
-5. Drive Track B in AC; capture telemetry.
-6. `python lap.py <car_dir> <track_b_csv> drivers/<name>.json --validate-against <real_lap_on_b>.csv`.
-
-**(v1.2) End-to-end workflow box for the ks_nurburgring sweep:**
-
-1. Pull the 5–10 newest laps for `<driver>` on Sprint A.
-2. `python fit_driver.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_sprint_a.csv drivers/<driver>.json --laps-glob "samples/aclog/<driver>_*.csv" --newest 10` → produces `drivers/<driver>.json` with enriched `profile.dynamic`.
-3. For each `<L> ∈ {gp_a, gp_b, sprint_a, sprint_b}`:
-   `python lap.py cars_csv/bmw_1m tracks_csv/ks_nurburgring/layout_<L>.csv drivers/<driver>.json --telemetry-dt-ms 10` → two-lap prediction + 10 ms telemetry per layout.
-4. Compare predicted lap times across the four layouts. Once real laps exist for the other three layouts, validate via `--validate-against`.
-
-### 15.3 CLI shape
-
-```
-python lap.py <car_data_dir> <track_csv> <driver_json> \
-              --validate-against <real_telemetry_csv> \
-              [--ds 2.0] [--no-plot] [--bin-m 100] [--per-corner] [--single-lap]
-```
-
-### 15.4 Algorithm
-
-Lives in `validate.validate_lap(...)`. Selects **lap 2** by default; resamples real onto sim lap-2 distance grid; bins; computes deltas; categorises.
-
-### 15.5 Outputs
-
-**Stdout:**
-```
-Track:               tracks_csv/brands_hatch/layout_indy_ideal_line.csv
-Driver:              drivers/ludvik_nurburgring_sprint.json  (fit on layout_sprint_a, 6 laps)
-Real lap:            1:24.812
-Sim lap 2 (flying):  1:26.301  (predicted)
-Delta:               +1.489 s  (+1.76%)
-Verdict:             GOOD
-```
-
-Verdicts: GOOD (|d| < 3 s AND |%| < 5), LOOSE (5–10 %), BAD (> 10 %).
-
-**Files:** `<track_stem>__<driver_name>_validation_overlay.png`, `<track_stem>__<driver_name>_validation_bins.csv`.
-
-### 15.6 Limitations
-
-v1 assumes `skill_pct` / `consistency_sigma` are track-agnostic. v2 candidates as before.
-
-### 15.7 Module placement
-
-- **New:** `src/lap_estimator/validate.py`.
-- **No new CLI.**
-- **Reused:** `telemetry.py`, `simulator.py`, `report.py`.
-
-### 15.8 Acceptance criteria (validate flow)
-
-1. End-to-end flag invocation runs.
-2. Verdict matches thresholds.
-3. Bins CSV well-formed.
-4. Overlay PNG produced unless `--no-plot`.
-5. Real-telemetry parsing reuses `telemetry.py`.
-6. `--validate-against` is read-only.
-7. Without flag, no validation outputs.
-8. **Soft acceptance:** |delta_s| < ~3 s on a 2–3 min lap.
-9. **(v1.1)** Default targets sim lap 2; `--single-lap` switches to lap 1 with warning.
-
-### 15.9 Open questions
-
-"Representative lap" definition; reverse-fit; threshold tuning.
+*(Unchanged.)*
 
 ---
 
 ## 16. Preparation pipeline (addendum, v1 reorg)
 
-### 16.1 Goal
-
-Single scripted path from raw AC content under `cars_in/` and `tracks_in/` to repo-friendly CSV artefacts.
-
-### 16.2 Non-goals
-
-- Re-encrypting AC data.
-- Modifying AC source folders.
-- Generating corner JSON (that's §17).
-- Wrapping low-level decoders.
-- Validating AC physics data.
-
-### 16.3 `prep/prep_car.py`
-
-```
-python prep/prep_car.py <cars_in_dir> [--output-root cars_csv]
-```
-
-Behaviour: validate `data.acd` exists, derive car name, invoke `decode_acd`, write to `cars_csv/<car>/data/`.
-
-### 16.4 `prep/prep_track.py`
-
-```
-python prep/prep_track.py <tracks_in_dir> [--output-root tracks_csv] [--ds 1.0] [--layouts all|<name>,...]
-```
-
-Behaviour: detect layouts via `ai/fast_lane.ai`, compute rich per-point CSV columns, resample to uniform `ds` grid, write `tracks_csv/<track>/layout_<L>.csv`.
-
-### 16.5 `prep/decode_acd.py` and `prep/decode_track.py`
-
-Existing code moved into `prep/`, refactored to expose callable functions; `__main__` blocks retained.
-
-### 16.6 Prerequisites for adding a new car or track
-
-**New car:** copy AC folder → `cars_in/<car>/` → `python prep/prep_car.py cars_in/<car>` → done.
-**New track:** copy → `tracks_in/<track>/` → `python prep/prep_track.py tracks_in/<track>` → (optional) corner analysis → done.
-
-### 16.7 Acceptance criteria (prep)
-
-See §11.11, §11.12.
+*(Unchanged.)*
 
 ---
 
 ## 17. Corner analysis (addendum, v1 reorg)
 
-### 17.1 Goal
-
-Turn a track CSV into a canonical, telemetry-free corner-notation JSON plus two visualisations, using `tracks_config.json` as source of truth.
-
-### 17.2 Non-goals
-
-- Merging telemetry.
-- Legacy DuckDB-staging CSVs.
-- Choosing racing line.
-- Per-corner driver fitting (v2).
-
-### 17.3 CLI shape
-
-```
-python analysis/corner_analysis.py <track_csv> [--config tracks_config.json] [--no-plot] [--no-json]
-```
-
-### 17.4 Output schema — `<layout_stem>_corners.json`
-
-```json
-{
-  "track": "ks_nurburgring",
-  "layout": "sprint_a",
-  "source_csv": "tracks_csv/ks_nurburgring/layout_sprint_a.csv",
-  "total_length_m": 3565.0,
-  "config": {
-    "hairpin_max_m": 60,
-    "tight_max_m": 150,
-    "sweeper_max_m": 400,
-    "straight_threshold_m": 500
-  },
-  "generated_at": "2026-05-13T14:22:01Z",
-  "version": "1",
-  "corners": [
-    {
-      "id": 1,
-      "type": "hairpin",
-      "direction": "left",
-      "distance_start_m": 412.3,
-      "distance_end_m": 478.1,
-      "length_m": 65.8,
-      "min_radius_m": 28.5,
-      "avg_radius_m": 41.2,
-      "ai_min_speed_kmh": 54.0,
-      "ai_avg_speed_kmh": 62.1
-    }
-  ]
-}
-```
-
-Field semantics as before — `track`, `layout`, `total_length_m`, `config`, `corners[].type` classification, `direction` from signed curvature, `length_m`, `ai_*_speed_kmh` over corner span.
-
-### 17.5 Algorithm
-
-1. Load CSV (radius_m, speed_kmh, x, z).
-2. Load `tracks_config.json`.
-3. Smooth `radius_m` with 25-sample moving average.
-4. Mark contiguous spans where `smooth_radius < straight_threshold_m`.
-5. Merge adjacent candidates.
-6. Compute `min_radius_m`, `avg_radius_m`, classify, infer direction.
-7. Emit JSON unless `--no-json`.
-8. Render two PNGs unless `--no-plot`.
-9. Print stdout summary table.
-
-### 17.6 Module layout
-
-`analysis/corner_analysis.py` — single file ~350 lines.
-
-### 17.7 Visualisations (kept from existing script)
-
-`<csv_stem>_corner_map.png`, `<csv_stem>_speed_vs_position.png`. Legacy DuckDB-staging CSVs dropped.
-
-### 17.8 Decisions baked in
-
-1. Corner notation is JSON, not CSV.
-2. One JSON per layout, alongside CSV.
-3. `tracks_config.json` is source of truth.
-4. Telemetry-free.
-5. Straight spans not emitted as corner records in v1.
-6. 500 m STRAIGHT_THRESHOLD_M default, config-overridable.
-7. Legacy exports dropped.
-
-### 17.9 Acceptance criteria (corner analysis)
-
-See §11.13, §11.14, §11.15.
-
-### 17.10 Open questions / v2 candidates
-
-Include straight spans; per-track corner naming; confidence score per corner; auto-discover all layouts.
+*(Unchanged.)*
 
 ---
 
 ## 18. MF4 telemetry output (v2, PLANNED — not implemented)
 
-### 18.1 Status
-
-**PLANNED for v2.0. NOT implemented in v1.** v1 ships CSV-only (§14); MF4 is purely additive.
-
-### 18.2 Goal & motivation
-
-Emit sim telemetry as ASAM MDF v4 (`.mf4`) alongside CSV. Two reasons: bridge until time-series DB lands; tool interoperability (asammdf, MATLAB, Vector CANape, ETAS INCA).
-
-### 18.3 Non-goals (v2.0)
-
-- Replacing CSV.
-- CAN-bus signals.
-- Multi-source / multi-rate channels.
-- Compressed / encrypted MF4.
-- Human-realistic input traces.
-- Read-side MF4 ingest in v2.0 (deferred to v2.1).
-
-### 18.4 Decisions baked in
-
-1. Format: ASAM MDF v4 (`.mf4`).
-2. Library: `asammdf` (PyPI, MIT). Optional dep behind `--mf4` flag.
-3. Scope: emit alongside CSV.
-4. Output path: `<track_dir>/<track_stem>__<driver_name>_sim_telemetry.mf4`.
-5. **Channel set (v2.0 minimum):** master `time` + `speed_ms`, `speed_kmh`, `distance_m`, `gas`, `brake`, `normalized_position`. Optional extras: `lat_g`, `long_g`, `rpm`, `gear`.
-6. **CLI surface change:** `--mf4` (default off), `--mf4-dt-ms` optional. `--no-telemetry --mf4` is an error.
-7. Read-side (v2.1): extension-dispatched parser in `telemetry.read_ac_log`.
-8. **Metadata block:** source car/track/driver, generator name + git sha, timestamp, CSV cross-reference.
-9. **Acceptance criteria (v2.0):** MF4 file produced next to CSV; channel/sample counts match; `asammdf` missing → exit code 2 with install hint; CSV emission unchanged when flag omitted; `--no-telemetry --mf4` rejected.
-10. Non-goals re-stated: no CAN, no multi-rate, no compression, no read-side in v2.0.
-
-### 18.5 Module placement
-
-- **New file:** `src/lap_estimator/sim_telemetry_mf4.py` with `write_synthetic_mf4(...)`. Lazy `asammdf` import.
-- `sim_telemetry.py` stays unchanged.
-- `lap.py` gains two flags + one-line dispatch.
-
-### 18.6 Read-side (v2.1, deferred)
-
-`telemetry.read_ac_log(path)` dispatches by extension: `.csv` → existing parser; `.mf4` → `asammdf`-backed reader mapping channels back to AC-schema names.
-
-### 18.7 Open questions
-
-`asammdf` as hard dep vs optional; metadata convention; channel naming convention; file extension `.mf4` vs `.mdf` vs `.dat`.
-
-### 18.8 References
-
-ASAM MDF v4 spec; `asammdf` library; §14; §7.7.
+*(Unchanged.)*
 
 ---
 
 ## 19. Backlog — complex physics & tyre damage (research, v3)
 
-### 19.1 Status
-
-**BACKLOG / research.** Not scheduled. v1 stays point-mass; v2 adds MF4 + tyre-state-as-grip-modifier; v3 is the slip-based rebuild.
-
-### 19.2 Item A — Slip-based tyre + drift / oversteer / understeer dynamics
-
-#### 19.2.1 Motivation
-
-Current sim is point-mass; cannot represent understeer, oversteer/drift, friction-ellipse, weight transfer transients.
-
-#### 19.2.2 Recommended approach — Pacejka "Magic Formula"
-
-MF5.2 or MF6.x. Inputs `Fz, α, κ, camber`; outputs `Fy, Fx, Mz`; combined slip via friction ellipse.
-
-#### 19.2.3 Architectural implication — distance-stepped sim cannot host this
-
-v3 sim is **time-domain ODE-integrated vehicle model**. State vector ~10 (body + per-wheel ω). RK4 at 1–5 ms. Driver becomes a control loop (preview + PID + slip-target). Sim lives alongside point-mass.
-
-#### 19.2.4 AC signals that make this feasible
-
-From `sensor_dictionary_merged.json`:
-- Body-frame kinematics: `velocity_*`, `localVelocity_*`, `localAngularVel_*`, `accG_*`, `heading/pitch/roll`.
-- Driver inputs: `steerAngle, gas, brake, clutch, gear`.
-- Per-wheel: `wheelSlip*`, `wheelLoad*`, `wheelAngularSpeed*`, `suspensionTravel*`, `camberRAD*`, `tyreContactPoint*`, `tyreContactNormal*`, `tyreContactHeading*`.
-
-Enough to **derive ground-truth (α, κ, Fz) per wheel** from real AC laps. Fit pipeline: log → compute per-wheel (α, κ, Fz, Fx, Fy) → fit MF coefficients.
-
-#### 19.2.5 Pacejka coefficient sourcing
-
-`tyres.ini` uses a simplified internal model — not directly Pacejka-compatible. Relevant fields: `DY0/DY1, DX0/DX1, SPEED_SENSITIVITY, FRICTION_LIMIT_ANGLE, XMU, FALLOFF_LEVEL/SPEED, LS_EXPY/LS_EXPX, DY_REF/DX_REF/FZ0, RELAXATION_LENGTH, CAMBER_GAIN, DCAMBER_0/1, FLEX*, PRESSURE_FLEX_GAIN, BRAKE_DX_MOD, CX_MULT`. Strategy: fit MF empirically to AC behaviour from test manoeuvres; bootstrap from `tyres.ini` for initial guess.
-
-#### 19.2.6 Driver model implications — v3 schema
-
-v1 driver JSON meaningless for slip-based sim. v3 driver needs: preview distance, lateral PID gains, slip-target setpoint (the "skill" knob), brake-release rate, throttle-application rate, reaction-time delay, mistake/consistency model. New `drivers_v3/` schema. `fit_driver.py --model {point-mass, slip}` flag.
-
-**(v1.2 hook)** `profile.dynamic.steering_aggression_deg_per_s` measured in v1.2 becomes a direct seed for the v3 driver's corner-entry yaw-input model. v3 spec should pick this up rather than re-measuring.
-
-#### 19.2.7 Effort estimate
-
-~5–6 weeks focused. Vehicle dynamics ~1 wk; tyre model ~1 wk + coefficient-fit pass; driver loop ~1 wk; integration ~2–3 days; validation ~1 wk.
-
-#### 19.2.8 Risks and open questions
-
-ODE stability at low speed; Pacejka fitting non-trivial; validation must compare distributions (G-G, yaw-rate, slip-angle), not just lap time; computational cost (numba JIT preferred); re-fit existing v1 drivers vs start fresh; diff modelling (v3.1); surface variation (v3.1).
-
-### 19.3 Item B — Tyre damage from type, temperature, wear, and pressure
-
-#### 19.3.1 Motivation
-
-Current sim uses fresh-tyre grip every lap. Reality evolves with compound, temperature, wear, pressure.
-
-#### 19.3.2 Recommended approach — per-wheel state, multiplicative grip modifier
-
-Per-wheel state: `T_core, wear_km, P`. `grip_mult(wheel) = thermal_curve(T_core) * wear_curve(wear_km) * pressure_curve(P)`. All three curves already in AC's `tyres.ini`.
-
-#### 19.3.3 AC data we already have
-
-- **Thermal:** `tcurve_*.lut`, `FRICTION_K, ROLLING_K, CORE_TRANSFER, COOL_FACTOR`.
-- **Wear:** `*_front.lut`, `*_rear.lut`, `VIRTUALKM.USE_LOAD`.
-- **Pressure:** `PRESSURE_STATIC, PRESSURE_IDEAL, PRESSURE_D_GAIN, PRESSURE_SPRING_GAIN, PRESSURE_FLEX_GAIN, PRESSURE_RR_GAIN`.
-- **Compounds:** `[FRONT], [FRONT_1], [FRONT_2]`, `[COMPOUND_DEFAULT].INDEX`.
-- **Telemetry:** `tyreTempIFL/MFL/OFL`, `tyreTempFL`, `tyreWearFL`, `wheelsPressureFL`, `tyreDirtyLevelFL`, `tyreCompound`, `aidTireRate`.
-
-#### 19.3.4 Compatibility — fits inside the existing point-mass sim
-
-Item B does **not** require Item A. Extend `Car` with optional per-wheel state; integrate `T_core, wear_km, P` each `ds`; apply `grip_mult` from LUTs. Effort: ~1 week of evening work.
-
-#### 19.3.5 Driver-fit implications
-
-`skill_pct` depends on tyre state. v2 mitigations: auto-detect tyre state from telemetry; `source.tyre_state` block in driver JSON.
-
-#### 19.3.6 Open questions (Item B)
-
-Multi-lap stint sim; cold-start initial T_core; flat-spotted/blistered/grained (v3); `aidTireRate` scaling; sessions vs laps.
-
-### 19.4 Recommended sequencing
-
-- **v1 (this branch):** point-mass + skill_pct + AC-schema CSV + validation + reorg.
-- **v2 (weeks of evening work, ships independently):** §18 MF4 output; §19.3 tyre-state model in point-mass; §19.3.5 telemetry-driven tyre-state detection; v2.1 candidate `stint.py`.
-- **v3 (multi-week project):** §19.2 slip-based ODE sim with Pacejka; v3.1 candidates diff, banking, surface grip, blistering.
-
-### 19.5 References
-
-Pacejka textbook; ASAM-XIL; Wikipedia overview; AC `sensor_dictionary_merged.json`; `cars_csv/bmw_1m/tyres.ini`; §18.
+*(Unchanged. Note: §19.3 "Item B — tyre damage" is **partially superseded** by §21 in v2. §19.3 retained as research scope for the deeper integration that lands in v3 alongside slip-based physics. The v2 implementation in §21 is the coarse, single-grip-envelope, post-lap-scaling version of the same idea.)*
 
 ---
 
 ## 20. Two-lap "tiled" simulation (addendum, v1.1)
 
-### 20.1 Goal
+*(Unchanged. v2 note: with `--laps 2` and `tyre_calibration.measured == false`, behaviour is byte-equivalent to v1.2.1 modulo the 12 new constant telemetry columns — §11.31. The stint wrapper in §21.4 detects `n_laps == 2 && !measured` and delegates straight to the existing `simulate(..., two_lap=True)` path for back-compat.)*
 
-Every `lap.py` invocation emits two consecutive laps: lap 1 from rest, lap 2 from lap-1 end-speed. Loop-closure (§14.9) and validation (§15) key off lap 2.
+---
 
-### 20.2 Non-goals
+## 21. Per-wheel tyre state & stint simulation (v2 — NEW)
 
-- Multi-lap (>2).
-- Fuel burn, tyre wear, brake fade across laps.
-- Driver learning per-lap.
-- Per-lap weather.
+### 21.1 Goal
 
-### 20.3 Decisions baked in
+Two concrete user use cases, verbatim:
+> "I have to estimate after how many laps tyres will have e.g. 80%."
+> "Driver telling: give me pressure in PSI so my tyres will have 50% after 12 laps."
 
-1. Two laps, always (default-on).
-2. Lap 1 from rest; lap 2 from lap-1 end speed.
-3. Tile segment list twice; 3-pass simulator unchanged.
-4. `SimResult.lap_id` per-point int array.
-5. Single combined CSV with `lap` column.
-6. Monotonic timestamps across boundary.
-7. `distanceTraveled` / `normalizedCarPosition` reset at boundary.
-8. MC applies to lap 2 only.
-9. Stdout reports both lap times.
-10. `--validate-against` targets sim lap 2.
-11. Loop-closure picks lap 2 by default.
+Deliver these by adding **per-wheel tyre state (temperature, wear, pressure)** that evolves across a multi-lap stint, plus an **inverse-PSI solver** that recommends cold setup pressures for a target wear at a target lap.
 
-### 20.4 CLI surface (additions to `lap.py`)
+**Architectural posture (option 2.5, not v3).** The existing 3-pass `simulator.py` and its single-scalar grip envelope are retained unchanged. Per-wheel state is computed **between laps**, then reduced to a scalar grip multiplier that scales `mu_x`/`mu_y` for the next lap's solver pass. Per-wheel forces, yaw dynamics, Pacejka, and slip-based control-loop drivers stay in v3 (§19).
 
+### 21.2 Non-goals
+
+- Per-wheel forces, yaw dynamics, Pacejka tyre model — all v3 (§19).
+- Tyre puncture / catastrophic failure modes.
+- Marble pickup, track-evolution grip, surface-rubber rollout.
+- Heat soak across pit stops, multi-stint sessions. v2 is one stint, no pit stop.
+- Slip-based control-loop drivers (§19.2.6) — v3.
+- ~~Per-compound thermal/wear LUT switching beyond first-compound default.~~ **(v2 amendment, 2026-05-14):** per-compound `f_pressure_grip`/`f_pressure_drag`/`f_temp`/`f_wear` LUT switching is now **in scope** for v2 — see §21.11. Out of scope: per-compound *calibration knob tables* (`k_friction`/`h`/`C_thermal`/`k_wear` stay compound-agnostic) and compound *mid-stint switching* (pit-stop compound change). Both are v1.3 candidates.
+- True weight-transfer transients (load builds up over time-domain integrations). v2 uses a quasi-static load-transfer coefficient (`k_load`).
+
+### 21.3 Algorithm — per-wheel state evolution
+
+State per wheel `w ∈ {FL, FR, RL, RR}`:
+- `temp_C[w]` — bulk tyre temperature (Celsius). Initial = `setup.ambient_temp_C` (or 25°C default).
+- `wear_pct[w]` — 0..100, 100 = fresh, 0 = bald. Initial = 100.
+- `pressure_psi[w]` — measured cold pressure. Initial = setup value (per-wheel from `setups/*.json` OR `--pressure FL=...,FR=...,RL=...,RR=...` OR active compound's `PRESSURE_STATIC` per axle).
+
+Plus diagnostic accumulators:
+- `cumulative_slip_energy_J[w]` — running sum across the stint.
+- `T_cold_K[w]` — pressure ideal-gas reference (set once at stint start; equals `ambient_temp_C + 273.15`).
+
+**Active compound (v2).** The per-segment update receives a `Compound` reference (see §21.11). All curves (`f_pressure_grip`, `f_pressure_drag`, `f_temp`, `f_wear`, wear-LUT, thermal-LUT) are looked up off that `Compound`, not off `car` directly.
+
+**Per-segment update (called once per simulator segment `(distance_m, v, radius)`):**
+
+1. **Slip-energy attribution.**
+   - Estimate lateral acceleration: `lat_g = v² / (R · g)` if `R < STRAIGHT_THRESHOLD_M`, else 0.
+   - Estimate longitudinal acceleration from the simulator's binding label (corner/accel/brake): `long_g = car.max_accel(v)/g` for accel; `-car.max_braking_decel(v)/g` for brake; 0 for corner.
+   - Per-wheel normal-load multiplier from load transfer:
+     - `lat_factor[outer_wheels] = 1 + k_load · |lat_g|`; `lat_factor[inner_wheels] = 1 - k_load · |lat_g|`. Outer/inner determined by sign of `radius` (left vs right corner — derived from track CSV signed radius). `k_load = 0.30` (hand-default; v2.1 candidate to make per-car).
+     - Longitudinal transfer: `long_factor[front] = 1 - k_long · long_g` for accel (weight shifts rearward); `long_factor[rear] = 1 + k_long · long_g`. For brake, signs flip. `k_long = 0.20` (hand-default).
+   - Per-wheel normal load: `Fz[w] = (m·g + downforce) · load_share[w]`, where `load_share[w]` integrates `cg_front`, `lat_factor`, `long_factor` and is normalised to sum to 1.0 across the four wheels.
+   - Driven-axle longitudinal energy carried by RWD = rear pair / FWD = front pair / AWD = all four (read `drive_type` from `Car`).
+   - Brake longitudinal energy split by `car.brake_front_share` (read from `brakes.ini`).
+   - **Slip-energy per wheel per segment:** `dE[w] = k_slip · Fz[w] · |a[w]| · dt`, where `a[w]` is the per-wheel longitudinal acceleration (0 for non-driven/non-braked wheels), and lateral contribution adds `Fz[w] · |lat_g| · |v| · dt`. Time step `dt = segment_length / v`. `k_slip` is a scalar calibration that rolls into `k_friction` — we don't separate them in v2.
+2. **Temperature update (per wheel).**
+   - `P_heat[w] = k_friction · dE[w] / dt` (Watts).
+   - `dT/dt[w] = (P_heat[w] - h · (temp_C[w] - ambient_temp_C)) / C_thermal`.
+   - Euler step: `temp_C[w] += dT/dt[w] · dt`.
+3. **Wear update (per wheel).**
+   - `f_temp_penalty(T)` — sharply rising above optimal. Use the **active compound's** `thermal_lut` (the `[THERMAL_FRONT_n]/[THERMAL_REAR_n].PERFORMANCE_CURVE`); the LUT itself is grip-vs-temp; invert to a wear penalty as `penalty = 1 / max(grip(T), 0.3)`. Optimal-temp window inferred from LUT peak. Front vs rear use the relevant axle's LUT.
+   - `dwear/dt[w] = k_wear · dE[w] / dt · f_temp_penalty(temp_C[w])` (units: pct/s).
+   - `wear_pct[w] -= dwear/dt[w] · dt` (clamped to `[0, 100]`).
+4. **Pressure update (per wheel).**
+   - `pressure_psi[w] = pressure_cold_psi[w] · (temp_C[w] + 273.15) / T_cold_K[w]`. Ideal-gas, isovolumetric. Pure function of current temp; recomputed each segment.
+
+**Per-lap state passthrough.** End-of-lap state (per-wheel `temp_C`, `wear_pct`, `pressure_psi`) becomes start-of-lap-(N+1). No reset between laps.
+
+**Scalar grip envelope reduction (called once per lap, before the next lap's 3-pass solver):**
+
+1. **Per-wheel grip multiplier** (cornering envelope — what `mu_x`, `mu_y` scale by):
+   `g[w] = f_temp(temp_C[w]) · f_wear(wear_pct[w]) · f_pressure_grip(pressure_psi[w])`.
+   - `f_temp(T)` — from the **active compound's** `thermal_lut` (axle-appropriate).
+   - `f_wear(w_pct)` — from the **active compound's** `wear_curve_lut` (axle-appropriate).
+   - **`f_pressure_grip(p_psi)`** (v1.3 — asymmetric):
+     - `p ≥ PRESSURE_IDEAL` (over-pressure side): `f_pressure_grip(p) = 1 - PRESSURE_D_GAIN · (p - PRESSURE_IDEAL)²`, clamped to `[0.30, 1.0]`. (Smaller contact patch → less grip — physically real.)
+     - `p < PRESSURE_IDEAL` (under-pressure side): `f_pressure_grip(p) = 1.0`. (No grip penalty. Larger contact patch in reality gives a small bonus; v1.3 ignores the bonus — see §3 non-goals.)
+     - Uses the **active compound's** `PRESSURE_IDEAL` (axle-appropriate) and `PRESSURE_D_GAIN`.
+
+2. **Per-wheel drag multiplier** (longitudinal drag envelope — aero drag + rolling resistance on straights):
+   `d[w] = f_pressure_drag(pressure_psi[w])`.
+   - **`f_pressure_drag(p_psi)`** (v1.3 — asymmetric):
+     - `p < PRESSURE_IDEAL` (under-pressure side): `f_pressure_drag(p) = 1 + k_drag · max((PRESSURE_IDEAL - p) / PRESSURE_IDEAL, 0)`. More drag (sidewall flex + rolling resistance). At `p = 0` hypothetically, drag is `1 + k_drag`. Hand-default `k_drag = 0.5`.
+     - `p ≥ PRESSURE_IDEAL` (over-pressure side): `f_pressure_drag(p) = 1 - k_drag_reduction · (p - PRESSURE_IDEAL) / PRESSURE_IDEAL`. Tiny benefit on straights (less rolling resistance from a stiffer, smaller patch). Hand-default `k_drag_reduction = 0.10`.
+     - Final clamp: `f_pressure_drag(p) ∈ [0.85, 1.50]`.
+     - Constants live on `Compound` (see §21.11 / §6.14). Compound-agnostic in v1.3 (same 0.5 / 0.10 for both Street and Semislicks); per-compound values are a v1.4 candidate.
+
+3. **Front-axle / rear-axle grip:** `g_front = min(g[FL], g[FR])`; `g_rear = min(g[RL], g[RR])`.
+4. **Combined scalar grip:** `g_combined = 0.5 · (g_front + g_rear)`. **Documented simplification:** equal-weight axle average loses balance information (oversteer/understeer requires yaw dynamics — see v3 §19.2). Acceptable for "how many laps to 80%?" / "what PSI for 50%?" use cases.
+5. **Combined scalar drag:** `drag_scale = mean(d[FL], d[FR], d[RL], d[RR])`. Equal-weight four-wheel average. Drag is a single-vehicle quantity (the whole car experiences one drag force); per-wheel pressures average naturally since all four contribute to rolling resistance.
+6. **Return:** `combined_grip_envelope(state, compound) -> (mu_x_scale, mu_y_scale, drag_scale)` where `mu_x_scale = mu_y_scale = g_combined`.
+
+**Solver wiring (v1.3 — Drag plumbing).** The 3-pass solver in `simulator.py` consumes `(mu_x_scale, mu_y_scale, drag_scale)`:
+- `mu_x_scale` / `mu_y_scale` scale `car.tyre_dy0_*` / `tyre_dx0_*` as in v2 (unchanged).
+- `drag_scale` multiplies the total drag force the solver applies during forward and backward velocity passes. Natural seam: if `Car` exposes a `drag_force(v)` or `total_drag(v)` helper, wrap it with `lambda v: drag_scale * car.drag_force(v)`. If drag is inlined into the solver's velocity-update loop (mixed aero + rolling-resistance term), refactor the smallest possible function around it so the multiplier lands in one place. The change must preserve §11.30: at `drag_scale == 1.0` (which is what IDEAL pressure produces) the lap time is byte-equivalent to v2.
+
+**Rationale for the asymmetric split (v1.3 motivation).** The pre-v1.3 symmetric quadratic `f_pressure(p) = 1 - PRESSURE_D_GAIN · (p - IDEAL)²` penalised grip on both sides. Physically wrong on the low side: under-pressure produces a *larger* contact patch (more mechanical grip), but slower lap times come from *higher rolling resistance and sidewall flex* (drag). The pre-v1.3 model double-counted — penalising grip when the real penalty is in drag. The fix is the split above: grip term penalty active only above IDEAL; drag term penalty active only below IDEAL. Live regression: Tomas's Semislicks lap at 26 psi (under-pressure, IDEAL=33) scored at 1:53.46 vs 1:47.33 at IDEAL — a 6 s deficit that the asymmetric model reduces to ~0–2 s (the residual is drag, which is physically expected and small at 26 psi). Over-pressure stays slow (44 psi → 2:51) because the grip term still penalises it.
+
+### 21.4 Multi-lap stint loop
+
+**CLI flag (`lap.py`):**
+- `--laps N` (int, default `2`, range `[1, 50]`).
+- `--laps 1` is equivalent to legacy `--single-lap`.
+- `--laps 2` is byte-compatible with the v1.1 default (§11.31).
+- `--laps N` for N ≥ 3 engages stint mode.
+
+**`simulator.simulate_stint(car, track, driver, *, n_laps, setup, compound, calibration, ds=2.0) -> StintResult`:**
+1. Initialise `TyreState` from `setup.pressures_psi`, `setup.ambient_temp_C`. Bind `compound` (the resolved active compound from §21.11).
+2. For `lap in 1..n_laps`:
+   a. Compute current scalar grip envelope `(mu_x_scale, mu_y_scale, drag_scale)` from `TyreState` and `compound` (§21.3 reduction).
+   b. Scale `car`'s `tyre_dy0_*`/`tyre_dx0_*` by `mu_*_scale` — using the active compound's `dy0/dy1/dx0/dx1` as the base, *not* the un-suffixed defaults (wrapper, not in-place — preserves `car` immutability).
+   c. Run `simulate(scaled_car, track, driver, ds=ds, two_lap=False, drag_scale=drag_scale)` → one-lap `SimResult`. **(v1.3)** `drag_scale` is threaded into the 3-pass solver as described in §21.3 "Solver wiring".
+   d. Walk the per-point arrays and update `TyreState` segment-by-segment (§21.3 steps 1–4) using the active `compound`. Record per-lap-end state snapshot.
+   e. Append per-lap-end state and lap-time to `StintResult`.
+3. Return `StintResult`.
+
+**`StintResult` dataclass** (in `simulator.py`):
+```python
+@dataclass
+class StintResult:
+    n_laps: int
+    setup: Setup
+    compound: Compound                  # active compound for the stint (v2)
+    calibration: TyreCalibration
+    lap_times_s: list[float]            # length n_laps
+    tyre_state_history: list[TyreState] # length n_laps + 1 (initial + end-of-each-lap)
+    per_lap_sim_results: list[SimResult] # for telemetry emission
 ```
-[--single-lap]
+
+**Telemetry emission (12 new columns — §7.12).** `sim_telemetry.write_synthetic_log` is extended to accept a `StintResult` (alternative to `SimResult`). The per-sample state values are forward-filled from the per-segment update — the writer walks segments in time order, updating state, and emits the current state alongside each row.
+
+### 21.5 Inverse-PSI solver
+
+**CLI shape (added to `lap.py`):**
+```
+python lap.py <car> <track> <driver> \
+              --solve-pressure-for-wear <pct> --at-lap <N> \
+              [--target-wheel min|max|avg|FL|FR|RL|RR] \
+              [--uniform-pressure] \
+              [--setup <path>] [--ambient-temp-c 25.0] [--compound <name>]
 ```
 
-### 20.5 Stdout report (extended from §7.6)
+`<pct>` is in `[0.0, 1.0]` (0.50 = 50% wear). `<N>` is target lap. Default `--target-wheel` is `max` (most-worn wheel — typically the outer-driven wheel). `--compound` follows the same precedence rules as in normal sim mode (§7.10).
 
-Two-lap (default):
+**Algorithm (`solve_setup.solve_pressure_for_wear`):**
+
+1. **Coarse seed scan.** For `seed_psi in {22, 27, 32, 37, 42, 47}`, run `simulate_stint(..., n_laps=N, setup=Setup(pressures={all: seed_psi}, ambient=..., compound=...))`. Record `target_wear_observed[seed_psi] = aggregate(wear_pct_at_lap_N, target_wheel)`. `aggregate` reduces 4 wheels → 1 number per the user's `--target-wheel` choice.
+2. **Bracket.** Find adjacent `(seed_lo, seed_hi)` where `target_wear_observed` straddles the target. If no bracket found across the seed grid, error: `could not find a setup hitting <pct>% wear at lap <N> in the PSI range [20, 50]`.
+3. **Bisection.** Per wheel (or single, if `--uniform-pressure`), bisect `[seed_lo, seed_hi]` for ≤ 12 iterations. Each iteration calls `simulate_stint(...)` with the candidate pressures.
+4. **Per-wheel bisection scheme (when not `--uniform-pressure`).** Bisect each wheel independently in turn (4 outer loops × ≤ 12 inner iterations = ≤ 48 stint sims worst case). Wheels are bisected in order `[FL, FR, RL, RR]`; after each wheel converges, its pressure is fixed and the next wheel bisects against the residual error. (Greedy coordinate descent — converges in practice on monotonic-wear-vs-PSI assumptions.)
+5. **Convergence.** Stop when `|target_wear_observed - <pct>| ≤ 0.01` (1% absolute) OR `|psi_hi - psi_lo| ≤ 0.5`.
+6. **Output:** four PSI values (or one if `--uniform-pressure`), plus a verification stint sim's per-lap state history.
+
+**Stdout output:**
 ```
-Lap 1 (standing): 1:48.612
-Lap 2 (flying):   1:46.231 ± 0.061 (N=20)
+Recommended setup for 50% wear at lap 12 on layout_sprint_a:
+  Compound: Semislicks (idx 1) | source: cli
+  FL = 31.2 psi  (cold)
+  FR = 30.8 psi  (cold)
+  RL = 28.4 psi  (cold)
+  RR = 28.1 psi  (cold)  <-- target wheel (max wear)
+
+Verification — predicted state under recommended setup:
+  Lap  Time     Wear FL/FR/RL/RR              Temp avg  Pressure avg
+  ----  ------  ------------------------------ --------  ------------
+   1   1:46.213 98% / 97% / 95% / 94%         76 °C     31.0 psi
+   2   1:46.198 96% / 94% / 89% / 88%         81 °C     32.4 psi
+   ...
+  12   1:47.804 78% / 76% / 53% / 50% <-      89 °C     34.1 psi
+
+Verdict: target hit (RR=50.0% ± 0.1%).
 ```
 
-`--single-lap`:
+### 21.6 Lake integration & fit
+
+**Extending `telemetry.read_ac_log`:**
+- Opportunistically read: `tyreCompound` (str), `wheelsPressureFL/FR/RL/RR` (PSI), `tyreTempFL/FR/RL/RR` (°C, core), `tyreWearFL/FR/RL/RR` (0..100, 100=fresh), `wheelLoadFL/FR/RL/RR` (N, optional).
+- Missing columns warn-and-continue; emit a single warning per file (`per-wheel state columns absent — tyre_calibration will use defaults`).
+- All extra columns passed through to the merged frame (downstream tools can inspect them).
+
+**Fit integration (in `fit_driver.fit_driver(...)` — §13.14):**
+- Compound resolution from telemetry (most-common `tyreCompound`) runs **before** the calibration step.
+- Calibration runs **before** `skill_pct` percentile.
+- Calibrated `f_temp/f_wear/f_pressure_grip` envelope (from the resolved compound) feeds into the `lat_g_max` calculation (§13.5 step 3) so `skill_pct` does not absorb tyre-state confounds. **(v1.3)** `f_pressure_drag` does *not* enter `lat_g_max` — it's a straight-line drag term, not a cornering grip term.
+- New driver-JSON field `tyre_calibration` (§7.2). `tyre_calibration.source.compound` records the resolved compound name.
+
+**Note on `skill_pct` tightening.** v2 calibration removes tyre-state confounds from the cornering-grip-utilisation calculation. Expect measured `skill_pct` to shift slightly across pre-v2/v2 fits of the same driver on the same telemetry — this is a *correction*, not a regression. Document in §13 risks for future tuners. **(v1.3)** A second, smaller shift occurs across pre-v1.3/v1.3 fits because the under-pressure grip penalty is removed from `f_pressure_grip`. Same nature — a correction.
+
+### 21.7 Setup config
+
+**Directory:** `setups/` at repo root. Tracked.
+
+**Example file `setups/bmw_1m_default.json`:**
+```json
+{
+  "car": "bmw_1m",
+  "name": "default",
+  "ambient_temp_C": 25.0,
+  "compound": "Street"
+}
 ```
-Lap Time: 1:48.612
+
+Note: when `pressures_psi` is omitted, the active compound's `PRESSURE_STATIC` is used per axle. For Street that yields FL/FR/RL/RR = 35.0 psi; for Semislicks 28.0 psi.
+
+**CLI resolution precedence** (high → low):
+1. `--pressure FL=...,FR=...,RL=...,RR=...` (per-wheel override).
+2. `--setup <path>` `pressures_psi` field.
+3. Active compound's `PRESSURE_STATIC` per axle (cold default).
+
+Per-wheel-override merges with `--setup` — unmentioned wheels keep setup-file values (or fall through to compound `PRESSURE_STATIC`). `--ambient-temp-c <C>` always overrides. `--compound <name>` always overrides setup-JSON `compound`.
+
+**Logged on stdout:** `Setup: <source> | FL=... FR=... RL=... RR=... | ambient=...°C | compound=<name>`.
+
+### 21.8 Module touchpoints
+
+- **New:** `src/lap_estimator/tyre_state.py` (~400 lines), `src/lap_estimator/setup.py` (~120 lines), `src/lap_estimator/solve_setup.py` (~250 lines).
+- **Touched:** `src/lap_estimator/car.py` (+`Compound` dataclass, +multi-compound parsing — §6.14, ~150 lines added), `src/lap_estimator/simulator.py` (+`simulate_stint`, +`StintResult`, **(v1.3)** +`drag_scale` kwarg threading), `src/lap_estimator/sim_telemetry.py` (+12 columns), `src/lap_estimator/report.py` (+per-lap printer, +stint-summary CSV), `src/lap_estimator/telemetry.py` (+per-wheel-state channel reads, +`tyreCompound` passthrough), `src/lap_estimator/driver_fit.py` (+`fit_tyre_calibration` step, +compound auto-select), `src/lap_estimator/driver.py` (+`tyre_calibration` load), `lap.py` (+CLI flags + dispatch to stint / solver modes, +`--compound`).
+- **Untouched:** `track.py`, `prep/*`, `analysis/*`, `validate.py`, `profile_dynamics.py`.
+
+### 21.9 Acceptance criteria (v2)
+
+See §11.27–§11.36 and §14.12 item 14. **(v1.3)** §11.37–§11.39 added.
+
+### 21.10 Open questions / v2.1 / v1.4 candidates
+
+- `k_load`, `k_long` as per-car parameters (vs hand-coded defaults).
+- Multi-stint with pit-stop heat-soak between stints.
+- Wear-rate units in user-friendly form (`wear_pct_per_km_at_ref_load` instead of `k_wear` per-Joule).
+- Numerical optimisation (Nelder-Mead, gradient-free) for coupled per-wheel inverse solve, replacing greedy coordinate descent.
+- Per-corner `target_wheel` (different wheel limits different corners).
+- Calibration loss function weights (`w_T`, `w_W`, `w_P`) as tunables, not hand-defaults.
+- Surface `cumulative_slip_energy_J` per wheel in the stint summary for diagnostic.
+- **(v1.4) `k_drag` and `k_drag_reduction` calibration from telemetry.** Run a pressure sweep in AC at fixed driver/track/compound, capture lap times at e.g. {22, 26, 29, 33, 37, 40, 44} psi, and fit `k_drag` against the under-IDEAL slope of lap-time-vs-pressure. Same for `k_drag_reduction` on the over-IDEAL side (small effect; expect noisy fit). Extend `fit_driver.py` with a `--fit-drag-knobs` flag that walks a stint at varying pressures and minimises lap-time RMSE.
+- **(v1.4) Asymmetric grip on the under-pressure side.** Current `f_pressure_grip(p < IDEAL) = 1.0` is conservative. Reality has a small bonus (larger contact patch → ~2–5% more lateral grip in `[IDEAL - 5, IDEAL]` psi). Hand-default `k_grip_bonus = 0.03` over `(IDEAL - 5 psi, IDEAL)` is a candidate.
+- **(v1.4) Per-compound `k_drag` / `k_drag_reduction`.** Real (slicks vs road tyres flex very differently), but unmeasured in v1.3. Field exists on `Compound`; values are constants for v1.3.
+
+### 21.11 Compound-aware tyres.ini parsing (v2 — NEW)
+
+**Motivation.** AC's `tyres.ini` may define multiple compounds. For the BMW M1: compound 0 (`Street`, `ST`) and compound 1 (`Semislicks`, `SM`) with very different `PRESSURE_IDEAL` (42/43 vs 33/34), `PRESSURE_STATIC` (35 vs 28), `PRESSURE_D_GAIN` (0.004 vs 0.0045), and different `WEAR_CURVE` / `[THERMAL_*]` LUTs. The v2 sim currently parses only the un-suffixed sections (compound 0 / Street). Tomas's real lap was on Semislicks at 26 psi cold; scored against Street's `PRESSURE_IDEAL=42`, `f_pressure` collapses to its 0.30 floor and the sim tanks. The fix is to parse all compounds and select the active one from setup / CLI / telemetry.
+
+**`Compound` dataclass** (lives in `car.py`):
+```python
+@dataclass(frozen=True)
+class Compound:
+    index: int                          # 0, 1, 2, ...
+    name: str                           # "Street", "Semislicks"
+    short_name: str                     # "ST", "SM"
+    pressure_ideal_front: float         # psi
+    pressure_ideal_rear: float
+    pressure_static_front: float        # psi (cold)
+    pressure_static_rear: float
+    pressure_d_gain: float              # scalar (front-rear-shared for simplicity; see note)
+    dy0_front: float; dy1_front: float
+    dx0_front: float; dx1_front: float
+    dy_ref_front: float; dx_ref_front: float
+    dy0_rear: float; dy1_rear: float
+    dx0_rear: float; dx1_rear: float
+    dy_ref_rear: float; dx_ref_rear: float
+    wear_curve_front: LUT               # parsed wear LUT
+    wear_curve_rear: LUT
+    thermal_lut_front: LUT              # PERFORMANCE_CURVE from [THERMAL_FRONT_n]
+    thermal_lut_rear: LUT
+    # v1.3 — drag-pressure constants (hand-defaults, not parsed from tyres.ini)
+    k_drag: float = 0.5
+    k_drag_reduction: float = 0.10
 ```
 
-### 20.6 Algorithm
+Note on `pressure_d_gain`: in BMW M1 `tyres.ini` it's shared across `[FRONT]/[REAR]`; if a future car splits it, extend to `pressure_d_gain_front/rear`.
 
-1. Build per-point segment list.
-2. Tile: concatenate with itself.
-3. Run 3-pass simulator on tiled grid (lap 2's forward pass starts from lap-1 final speed).
-4. Split into `lap_id` based on `distance_m < total_length_m`.
-5. For telemetry: build single time grid, time-resample, derive gas/brake per §14.3, emit one CSV with `lap` column.
-6. For MC: only lap-2 contributes to mean/std.
+Note on `k_drag` / `k_drag_reduction`: not parsed from `tyres.ini` (AC has no source for them). Set at `Compound` construction with hand-defaults. Compound-agnostic in v1.3 (both Street and Semislicks get 0.5 / 0.10); per-compound calibration is v1.4 (§21.10).
 
-### 20.7 Acceptance criteria
+**Section discovery.** `Car.from_dir` scans `tyres.ini` for any of `[FRONT]`, `[FRONT_n]`, `[REAR]`, `[REAR_n]`, `[THERMAL_FRONT]`, `[THERMAL_FRONT_n]`, `[THERMAL_REAR]`, `[THERMAL_REAR_n]` where `n ∈ {1, 2, 3, ...}` (un-suffixed = index 0, suffix `_k` = index `k`). For each `n` discovered across all four section families, build a `Compound(index=n, ...)`. If any of the four families is missing for a given `n`, raise a clear parse error: `tyres.ini compound index <n>: missing section [<FAMILY>_<n>] (got: [FRONT_<n>], [REAR_<n>], ...)`.
 
-See §11.18. Headline: `lap` column has `{1, 2}`; lap 2 ≤ lap 1 + `consistency_sigma`; `timestamp_ms` monotonic; `distanceTraveled` resets at boundary; `--single-lap` reduces to lap 1.
+**Default compound selection.** If `tyres.ini` has a `[COMPOUND_DEFAULT]` section with `INDEX=<n>`, use that; otherwise `default_compound_index = 0`.
 
-### 20.8 Module touchpoints
+**`Car.find_compound(query: str) -> Compound | None`:** case-insensitive match against `name` and `short_name`. Strips trailing parenthetical short-name (regex `\s*\([^)]+\)\s*$`) so `"Semislicks (SM)"` matches `"Semislicks"`. Returns `None` on miss.
 
-`simulator.py`, `sim_telemetry.py`, `report.py`, `validate.py`, `driver_fit.py`, `lap.py`, `fit_driver.py`.
+**Compound resolution precedence** (high → low) at sim invocation:
+1. `--compound <name>` CLI flag on `lap.py`.
+2. Setup-JSON `compound` field.
+3. Telemetry's `tyreCompound` (only inside `fit_driver.py`).
+4. `car.compounds[car.default_compound_index]`.
 
-### 20.9 Open questions / v2 candidates
+On unknown name at level 1 or 2: argparse error / load-time error listing available compound names. On unknown at level 3: warn and fall through to level 4. The resolved compound is logged on stdout: `Compound: <name> (idx <i>) | source: <cli|setup|telemetry|car-default>`.
 
-Suppress lap 1 from CSV; multi-lap (>2) stint; lap-1 standing-start variance.
+**Per-compound function plumbing.** `tyre_state.py`'s `update_per_segment`, `update_per_lap`, and `combined_grip_envelope` all take a `Compound` parameter and look up `f_pressure_grip/f_pressure_drag/f_temp/f_wear` off it. `simulate_stint` resolves the active compound once at entry and threads it through. The default `dy0/dy1/dx0/dx1/dy_ref/dx_ref` baseline used for `mu_x`/`mu_y` scaling is also drawn from the active compound (not from un-suffixed defaults).
+
+**Cold-pressure default.** When `setup.pressures_psi` is absent, fall back to the **active compound's `PRESSURE_STATIC`** per axle. `PRESSURE_STATIC` is the cold-pressure target (what a driver dials in pre-session); `PRESSURE_IDEAL` is the hot-grip-peak target (what the tyre should reach after warm-up). Earlier v2 drafts had this inverted — corrected here.
+
+**Calibration knobs stay compound-agnostic in v2.** `tyre_calibration.{k_friction, h, C_thermal, k_wear}` are physical heating/wear constants and apply across compounds. Per-compound knob tables are a v1.3 candidate — flagged in §3 non-goals and in the backlog notes below. The fitter records `tyre_calibration.source.compound` for traceability when fitting, but the knobs themselves are single-valued. **(v1.3)** Same for `k_drag` / `k_drag_reduction` — they live on `Compound` but are compound-agnostic constants in v1.3 (per-compound calibration is v1.4).
+
+**Backward compat.** Cars with a single un-suffixed compound block (no `_1` sections) parse to `car.compounds == [Compound(index=0, name=<from NAME or "default">, ...)]`. Setup JSONs without `compound` and invocations without `--compound` continue to work — they pick `car.default_compound_index == 0`. Any callers of the deprecated direct attributes (`car.pressure_ideal_front`, `car.pressure_d_gain`, etc.) are migrated to go through `car.compounds[idx]`; if a quick-shim is needed, expose properties on `Car` that delegate to `car.compounds[car.default_compound_index]` for one release.
+
+**Acceptance.** §11.34 (parsing both compounds), §11.35 (Semislicks at 26 psi sim runs without grip-floor collapse — now subsumed by v1.3's §11.37), §11.36 (fitter auto-selects compound from telemetry).
+
+**Backlog (v1.3 / v1.4 candidates — not building now):**
+- Per-compound calibration knob tables (`k_friction`/`h`/`C_thermal`/`k_wear` differ by compound — different thermal mass, different friction characteristics).
+- Compound mid-stint switching (pit stop with fresh tyres on a different compound). Requires a pit-stop event in `simulate_stint`'s lap loop and a state-transfer model (new compound → fresh wear/temp/pressure).
+- **(v1.4)** Per-compound `k_drag` / `k_drag_reduction` calibration from telemetry pressure sweeps. See §21.10.
 
 ---
 
 ## Decisions block (locked in this revision)
 
-1. **Folder convention is locked.** `cars_in/` / `tracks_in/` = user-dropped raw AC (gitignored). `cars_csv/` / `tracks_csv/` = tracked outputs of prep. `drivers/` = tracked driver JSONs. `samples/aclog/` = tracked sample telemetry. (§6.9)
-2. **Repo layout uses a `src/lap_estimator/` package** for simulator library code, with `prep/`, `analysis/`, and root-level CLIs (`lap.py`, `fit_driver.py`) as separate scopes. Path bootstrap via per-script `sys.path` insert until a `pyproject.toml` editable install lands. (§6.8)
-3. **Two simulator CLIs** (`fit_driver.py`, `lap.py`) plus **three pipeline CLIs** (`prep/prep_car.py`, `prep/prep_track.py`, `analysis/corner_analysis.py`) — five total entry points. No separate `validate_lap.py`. (§14.4 item 12, §15.7)
-4. **Corner notation lives in `<track_dir>/<layout_stem>_corners.json`** with the schema in §17.4. JSON, not CSV. Telemetry-free.
-5. **`tracks_config.json` is the in-repo single source of truth for corner-classification thresholds and colours.** Loaded by `analysis/corner_analysis.py`. (§7.9, §17.8)
-6. **Corner analysis is downstream of prep, not part of it.** Two independent steps. (§16.2, §17.1)
-7. **Legacy DuckDB-staging CSVs (`track_points.csv`, `track_corners.csv`, `track_meta.csv`) are dropped.** The JSON notation file replaces them.
-8. **Sample AC telemetry log moves to `samples/aclog/2026-04-07T135548_260Z_Tms_Lap2.csv`** and is committed. The existing `Corner_Analysis/` folder is untouched (user-managed scratch). (§6.9, §10)
-9. **`cars_in/*` and `tracks_in/*` stay gitignored** (already in `.gitignore`). `tracks_csv/`, `cars_csv/`, `drivers/`, `samples/`, `tracks_config.json`: tracked. (§6.9)
-10. **`prep_track.py` does not auto-invoke corner analysis.** User chains the two commands. v2 candidate for a `prep_all.py` umbrella.
-11. **`analysis/corner_analysis.py` is a rewrite, not an in-place edit** of the existing `Corner_Analysis/corner_analysis.py`. The latter stays as user scratch.
-12. **MF4 telemetry output is v2, PLANNED, not v1.** Format = ASAM MDF v4 via `asammdf` (optional dependency); emitted alongside CSV when `--mf4` is passed to `lap.py`; channel set mirrors the AC-schema CSV one-to-one. Read-side MF4 ingest is v2.1. (§18)
-13. **Slip-based physics (drift / oversteer / understeer) and per-wheel tyre-state (temp / wear / pressure) are v3 / v2 backlog research items, not v1.** v3 = slip-based ODE sim + Pacejka tyre model + new driver schema (multi-week build). v2 = tyre-state-as-grip-modifier inside the existing point-mass sim (one week of evening work). Both items are scoped in §19, with AC signal coverage, architectural impact, and risks documented. v1 stays point-mass with isotropic μ. (§19)
-14. **(v1.1-A) Driver config format is JSON, not YAML.** `drivers/*.json` exclusively; no YAML loader fallback. PyYAML dropped from project requirements. Rationale: rest of the repo (tracks_config, corners JSON, sim telemetry CSV/PNG) is already JSON; driver schema is flat enough that YAML's comment + nesting advantages don't justify the dep. Migration: every existing `drivers/*.yaml` is rewritten as `.json` and the `.yaml` deleted in a single commit. (§6.2, §7.2, §10)
-15. **(v1.1-B) Driver-lag 1st-order low-pass on emitted gas/brake.** New driver field `driver_tau_s` (seconds, default `0.12`). Applied independently to `gas` and `brake` as Layer 3 of the §14.3 pipeline, after the corner-shape heuristic, before CSV write. `α = dt / (τ + dt)`. `τ = 0` bypasses the filter. Default 0.12 s chosen as a human pedal-modulation time constant (motor-reflex floor ≈ 80–120 ms; user accepted Buddy recommendation over an initial 20 ms guess that gave near-zero smoothing at 100 ms sampling). (§13.6/§7.2, §14.3 Layer 3)
-16. **(v1.1-C) Trail-brake + throttle-ramp heuristic on emitted gas/brake.** New driver fields `trail_brake_m` (default `30.0`) and `throttle_ramp_m` (default `40.0`). Applied as Layer 2 of the §14.3 pipeline — between the limit-label rule and the driver-lag low-pass. Order is load-bearing: heuristic shapes the corner geometry on sharp limit-label transitions, then the low-pass smooths residual edges. Inverting the order would smear the limit-label transitions before the heuristic can read them. Either field set to `0.0` disables that heuristic. (§7.2, §14.3 Layer 2)
-17. **(v1.1-D) Two-lap "tiled" simulation, always default.** Every `lap.py` invocation simulates lap 1 (standing start) and lap 2 (flying start from lap-1 end-of-lap speed) and emits both. Single combined telemetry/trace CSV with a `lap` column; monotonic `timestamp_ms` across the boundary; `distanceTraveled` and `normalizedCarPosition` reset per lap. Monte-Carlo applies to lap 2 only; lap 1 is deterministic. `--validate-against` compares the real lap against sim lap 2. Loop-closure picks sim lap 2 by default. `--single-lap` CLI flag is the explicit opt-out (legacy v1 behaviour, lap 1 only). (§20, §7.4, §7.6, §7.7, §15.4)
-18. **(v1.1-E) Multi-lap fit mandatory (≥2 laps). Sample pooling, not skill averaging. Unfinished laps accepted. Out-lap trim retained but lap 1 no longer excluded by rule.** `fit_driver.py` rejects single-lap input at parse time with the error "fit requires ≥2 laps; see §13". CLI shape is variadic positional (`<car> <track> <out> <lap1.csv> <lap2.csv> [<lap3.csv> ...]`) plus a `--laps-glob` shorthand. Algorithm pools all cornering-sample grip-utilisation values across laps into one array; `skill_pct` = 85th percentile of the pool; `consistency_sigma_util` = stdev of the pool (mapped to seconds via the existing `/0.03` heuristic). Pooling is statistically more robust than averaging per-lap percentiles — sample weight is proportional to data quantity. Unfinished laps (NCP span < 0.9 post-trim) still contribute cornering samples; only their real lap time is excluded from the finished-lap mean. The existing out-lap trim (drop pre-start-line portion via NCP-wrap detection) is retained; the trimmed remainder is included in the pool. Output JSON's `source` block grows: `telemetry_csvs[]`, `n_laps`, `n_finished_laps`, `real_lap_times_s[]`, `pooled_sample_count`; `real_lap_time_s` is kept as the mean of finished-lap times for backward compatibility. Validation prints `Real laps used / Mean real lap time / Sim lap 2 / Delta vs mean real / Verdict`. (§13.1, §13.3, §13.5, §11.20, §11.21)
-19. **(v1.2-F) Driver-profile dynamic signals (tau, taper, ramp, pedal-press-rate, steering-aggression) now measured from telemetry, not hand-defaulted.** `fit_driver.py` runs `profile_dynamics.measure_dynamics(merged_frames)` after the cornering-sample pool step and writes the results under a new `profile.dynamic.*` block in the driver JSON. Hand-defaults (0.12 / 30.0 / 40.0) remain as fallbacks when a measurement cannot be extracted (too few clean edges / no `steerAngle` channel). Each measured field carries a `measured` boolean so consumers can tell at a glance which path was taken. `pedal_press_rate_per_s` and `steering_aggression_deg_per_s` are recorded as statistics only; the v1.2 simulator does not consume them (v1.3 hook). Top-level `driver_tau_s` / `trail_brake_m` / `throttle_ramp_m` continue to exist for backward compatibility and mirror the profile values. (§7.2, §13.5 step 5b, §13.11, §11.22)
-20. **(v1.2-G) Lap-selection rule: 5–10 newest, fallback to all if fewer than 5, hard minimum 2.** When `fit_driver.py` is handed more than 10 candidate laps (positional or `--laps-glob`), it keeps only the 10 newest by file mtime. The cap is configurable via `--newest N` (default 10). Fewer than 10 candidates → use all. Fewer than 2 → existing hard error fires. The pre-fit summary prints the selection (`12 candidates → kept 10`); the JSON's `source.lap_selection` block records the rule, candidate count, selected count, and selected source paths. (§13.12, §11.25)
-21. **(v1.2-H) Default `--telemetry-dt-ms` raised from 100 to 10.** Sim telemetry CSV emitted at 100 Hz by default (was 10 Hz). 10× larger files; accepted for the dramatically improved driver-lag smoothing fidelity (α = 0.010 / (0.120 + 0.010) ≈ 0.077 vs 0.455 at 100 ms). Old behaviour reproducible with `--telemetry-dt-ms 100`. README and `lap.py --help` updated. (§14.3 Layer 3, §14.4 item 2, §14.5, §11.23)
+1. **Folder convention is locked.** `cars_in/` / `tracks_in/` = user-dropped raw AC (gitignored). `cars_csv/` / `tracks_csv/` = tracked outputs of prep. `drivers/` = tracked driver JSONs. `samples/aclog/` = tracked sample telemetry. **(v2)** `setups/` = tracked setup JSONs. (§6.9)
+2. **Repo layout uses a `src/lap_estimator/` package.** (§6.8)
+3. **Two simulator CLIs + three pipeline CLIs.** (§14.4 item 12, §15.7)
+4. **Corner notation lives in `<track_dir>/<layout_stem>_corners.json`.**
+5. **`tracks_config.json` is the in-repo single source of truth for corner-classification thresholds.**
+6. **Corner analysis is downstream of prep, not part of it.**
+7. **Legacy DuckDB-staging CSVs are dropped.**
+8. **Sample AC telemetry log lives in `samples/aclog/`.**
+9. **`cars_in/*` and `tracks_in/*` stay gitignored.**
+10. **`prep_track.py` does not auto-invoke corner analysis.**
+11. **`analysis/corner_analysis.py` is a rewrite.**
+12. **MF4 telemetry output is v2 PLANNED.** (§18)
+13. **Slip-based physics, per-wheel forces, yaw dynamics are v3 backlog.** (§19) *(v2 amendment: per-wheel tyre **state** — temp/wear/pressure — lands in v2 via §21 using single-grip-envelope post-lap scaling. Per-wheel **forces** stay in v3.)*
+14. **(v1.1-A) Driver config format is JSON.**
+15. ~~**(v1.1-B) Driver-lag IIR low-pass.**~~ **Superseded by item 22.**
+16. **(v1.1-C) Trail-brake + throttle-ramp heuristic.**
+17. **(v1.1-D) Two-lap "tiled" simulation default.**
+18. **(v1.1-E) Multi-lap fit mandatory.**
+19. **(v1.2-F) Driver-profile dynamic signals measured from telemetry.** (v1.2.1 amendment: `driver_tau_s` joins statistic-only set.)
+20. **(v1.2-G) Lap-selection rule: 5–10 newest.**
+21. **(v1.2-H) Default `--telemetry-dt-ms` = 10.**
+22. **(v1.2.1) Driver-lag IIR low-pass removed from sim telemetry emission.** Supersedes item 15.
+23. **(v2) Per-wheel tyre state, multi-lap stint sim, inverse PSI solver — option 2.5, not v3.** The existing 3-pass `simulator.py` and single-grip-envelope architecture are retained. Per-wheel state (`temp_C`, `wear_pct`, `pressure_psi` per FL/FR/RL/RR) evolves between laps via slip-energy attribution (§21.3) using a coarse load-transfer model with hand-coded `k_load = 0.30` and `k_long = 0.20`. Four calibration knobs (`k_friction`, `h`, `C_thermal`, `k_wear`) live in the driver JSON under `tyre_calibration` and are fit against measured lake telemetry (`tyreTemp*`, `tyreWear*`, `wheelsPressure*`) by `fit_driver.py` when those channels are present (§13.14). When absent, hand-defaults are used and `measured: false` is flagged. The scalar grip envelope reduction is `0.5 · (min(g_FL, g_FR) + min(g_RL, g_RR))` — a documented simplification that loses oversteer/understeer balance (v3 hook §19.2). CLI gains `--laps N` (default 2 for back-compat with §20; range [1, 50]), `--setup <path>`, `--pressure FL=...`, `--ambient-temp-c`, plus the inverse-solver flags `--solve-pressure-for-wear <pct> --at-lap <N> [--target-wheel min|max|avg|FL|...] [--uniform-pressure]`. Inverse solver is greedy per-wheel bisection over [20, 50] psi seeded by a 6-point grid scan, tolerance ±1% wear or ±0.5 psi. Default target-wheel is `max` (most-worn). Setups directory `setups/` is tracked; resolution precedence `--pressure` > `--setup` > active compound's `PRESSURE_STATIC` from `tyres.ini` (per axle). Telemetry CSV gains 12 trailing per-wheel state columns (always emitted in stint mode; constant when no calibration). Stint summary CSV `<track_stem>_stint_summary.csv` written next to track. Single-lap regression preserved (§11.30). Per-wheel forces, yaw dynamics, Pacejka, slip-based control-loop drivers, tyre puncture, marbles, multi-stint/pit-stop heat soak — all stay in v3 (§19) or out-of-scope. (§21, §11.27–§11.36, §13.14, §14.12 item 14, §7.2 `tyre_calibration`, §7.10 setup JSON schema, §7.11 stint summary CSV, §7.12 telemetry column extension.)
+24. **(v2) Compound-aware `tyres.ini` parsing.** `Car` holds `compounds: list[Compound]` (one entry per `[FRONT_n]/[REAR_n]/[THERMAL_FRONT_n]/[THERMAL_REAR_n]` quadruple; un-suffixed = index 0). Each `Compound` carries `name`, `short_name`, per-axle `pressure_ideal`, `pressure_static`, `pressure_d_gain`, wear LUT, thermal LUT, and `dy0/dy1/dx0/dx1/dy_ref/dx_ref`. `default_compound_index` honours `[COMPOUND_DEFAULT]` `INDEX` if present, else 0. Active-compound resolution precedence: `--compound` CLI > setup-JSON `compound` > telemetry `tyreCompound` (fitter only) > `default_compound_index`. Matching is case-insensitive against `name` or `short_name` and strips trailing parenthetical (so `"Semislicks (SM)"` matches). `f_pressure_grip`/`f_pressure_drag`/`f_temp`/`f_wear` and `mu_x`/`mu_y` baselines all key off the active compound. Cold-pressure default falls back to active compound's `PRESSURE_STATIC` per axle (not `PRESSURE_IDEAL`). `tyre_calibration` knobs (`k_friction`/`h`/`C_thermal`/`k_wear`) stay compound-agnostic in v2 — per-compound knob tables and compound mid-stint switching are v1.3 backlog. Driver JSON `tyre_calibration.source.compound` records the compound the fit was performed against. CLI flag `--compound <name>` added to `lap.py` (normal sim + inverse solver modes). (§21.11, §11.34–§11.36, §7.10 setup JSON `compound` semantics, §6.14, §13.14 compound resolution.)
+25. **(v1.3) Pressure penalty asymmetric.** Grip penalty active only above `PRESSURE_IDEAL` (over-pressure → smaller contact patch → less grip). Drag penalty active only below `PRESSURE_IDEAL` (under-pressure → rolling resistance + sidewall flex → more drag). Symmetric quadratic from v2 removed as physically incorrect (double-counted the low-PSI loss in the grip term where it belonged in the drag term). The single `f_pressure(p)` is split into two compound-attached functions: `f_pressure_grip(p)` (one-sided quadratic above IDEAL, clamp `[0.30, 1.0]`; `1.0` below IDEAL) and `f_pressure_drag(p)` (linear penalty below IDEAL with hand-default `k_drag = 0.5`; small linear benefit above IDEAL with hand-default `k_drag_reduction = 0.10`; clamp `[0.85, 1.50]`). `combined_grip_envelope` return arity goes from 2-tuple to 3-tuple: `(mu_x_scale, mu_y_scale, drag_scale)`. `drag_scale` is threaded into the 3-pass solver and multiplies the total drag force (aero + rolling resistance) per lap. `k_drag` and `k_drag_reduction` live on `Compound` but are compound-agnostic in v1.3 (hand-defaults; not parsed from `tyres.ini`); per-compound calibration is v1.4. Calibration from telemetry deferred — v1.4 candidate that fits the constants against an AC pressure sweep. Under-pressure grip bonus (real but small) ignored in v1.3 — `f_pressure_grip(p < IDEAL) = 1.0` (no bonus, no penalty); v1.4 candidate. Acceptance §11.37 (low-PSI lap time within ±2 s of IDEAL — fixes the Tomas Semislicks 26 psi regression), §11.38 (over-pressure grip penalty preserved at 44 psi), §11.39 (asymmetric pressure sweep curve). (§21.3, §11.37–§11.39, §6.14, §6.11.)

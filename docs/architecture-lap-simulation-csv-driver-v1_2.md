@@ -153,8 +153,34 @@ happens to peg the clamp. Downstream consumers can read the
 ## Forward-compatibility hooks (recorded for v1.3)
 
 - The statistic fields are already on the `Driver` dataclass; wiring them
-  into a slew-rate-limited filter (replacing the current 1st-order
+  into a slew-rate-limited filter (replacing the now-removed 1st-order
   low-pass) is purely a `sim_telemetry.py` change.
 - `profile.dynamic.by_corner_type` is reserved (spec §13.13) — keep new
   per-corner overrides under `profile.dynamic.<scope>` to avoid touching
   the top-level schema.
+
+## v1.2.1 — IIR low-pass removed
+
+Removed IIR low-pass on emitted gas/brake (was cosmetic; racing has no
+classical reaction time, only motor execution ~20–50 ms which is sub-sample
+at 50 Hz). `driver_tau_s` retained as statistic only.
+
+Touchpoints:
+- `src/lap_estimator/sim_telemetry.py`: deleted Layer 3 block and the
+  `_iir_lowpass` helper. Pipeline is now two layers (limit-label rule →
+  corner-shape heuristic) and the heuristic's output is written to disk
+  directly. The function signature is unchanged; `driver.driver_tau_s` is
+  simply no longer read.
+- `src/lap_estimator/driver.py`: `driver_tau_s` stays on the dataclass and
+  in `Driver.load` for back-compat / statistics; a comment marks it as
+  unused by the sim.
+- `src/lap_estimator/profile_dynamics.py`: unchanged — still measures
+  `driver_tau_s` as a driver characteristic.
+- README: removed the "1st-order driver-lag low-pass" claim from the v1.1
+  blurb; updated `driver_tau_s` field semantics to "statistic only, not
+  consumed by sim".
+- No CLI changes (`--telemetry-dt-ms` default stays at 10).
+
+Spec references: §14.1 (rationale), §14.3 (two-layer pipeline), §14.10
+items 11 / 13 (acceptance criteria), §11.26 (invariance under
+`driver_tau_s`), Decisions item 22 (supersedes item 15).

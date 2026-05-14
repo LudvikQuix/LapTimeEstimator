@@ -117,7 +117,7 @@ def main():
             sys.exit(2)
 
     try:
-        fit = fit_driver(car, merged_frames)
+        fit = fit_driver(car, merged_frames, track=track)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(2)
@@ -129,6 +129,33 @@ def main():
     name = args.name or _derive_name(args.output)
     profile_block, top_level_dynamics = _profile_payload(fit.profile)
 
+    # v2: tyre_calibration block (spec §7.2 / §13.14 / §21.11).
+    tc = fit.tyre_calibration
+    tyre_calibration_block = {
+        "k_friction": round(float(tc.k_friction), 6) if tc is not None else 1.0,
+        "h": round(float(tc.h), 4) if tc is not None else 50.0,
+        "C_thermal": round(float(tc.C_thermal), 2) if tc is not None else 5000.0,
+        "k_wear": float(tc.k_wear) if tc is not None else 1.0e-7,
+        "measured": bool(tc.measured) if tc is not None else False,
+        "source": {
+            "telemetry_csvs": [_norm(p) for p in selected],
+            "compound": fit.compound_name,
+            "fit_rmse_temp_C": round(fit.tyre_calibration_rmse.get("rmse_temp_C"), 4)
+                if fit.tyre_calibration_rmse else None,
+            "fit_rmse_wear_pct": round(fit.tyre_calibration_rmse.get("rmse_wear_pct"), 4)
+                if fit.tyre_calibration_rmse else None,
+            "fit_rmse_pressure_psi": round(fit.tyre_calibration_rmse.get("rmse_pressure_psi"), 4)
+                if fit.tyre_calibration_rmse else None,
+            "fitted_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+    }
+    if fit.compound_name is not None:
+        print(
+            f"Tyre compound: {fit.compound_name} (source: {fit.compound_source})"
+        )
+    if tc is None or not tc.measured:
+        print("Tyre calibration: per-wheel state channels absent - using hand-defaults")
+
     payload = {
         "name": name,
         "skill_pct": round(fit.skill_pct, 4),
@@ -137,6 +164,7 @@ def main():
         "trail_brake_m": round(top_level_dynamics["trail_brake_m"], 2),
         "throttle_ramp_m": round(top_level_dynamics["throttle_ramp_m"], 2),
         "profile": profile_block,
+        "tyre_calibration": tyre_calibration_block,
         "source": {
             "telemetry_csvs": [_norm(p) for p in selected],
             "track_csv": _norm(args.track),
