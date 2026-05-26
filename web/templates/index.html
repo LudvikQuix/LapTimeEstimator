@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ title }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen font-sans">
+  <header class="border-b border-slate-700 px-6 py-3 flex items-center gap-6">
+    <div class="text-lg font-semibold tracking-wide">Lap Time Estimator</div>
+    <nav class="flex gap-1" id="tab-strip">
+      <button data-tab="sim"      class="tab-btn px-3 py-1.5 rounded text-sm bg-slate-700">Sim</button>
+      <button data-tab="driver"   class="tab-btn px-3 py-1.5 rounded text-sm hover:bg-slate-700">Driver</button>
+      <button data-tab="stint"    class="tab-btn px-3 py-1.5 rounded text-sm hover:bg-slate-700">Stint Solver</button>
+      <button data-tab="validate" class="tab-btn px-3 py-1.5 rounded text-sm hover:bg-slate-700">Validate</button>
+      <button data-tab="lake"     class="tab-btn px-3 py-1.5 rounded text-sm hover:bg-slate-700">Lake</button>
+    </nav>
+    <div class="ml-auto flex items-center gap-3 text-sm">
+      <span class="text-slate-400">Lake:</span>
+      <span id="lake-state" class="px-2 py-0.5 rounded bg-slate-700 text-xs">checking...</span>
+    </div>
+  </header>
+
+  <main class="px-6 py-6 max-w-7xl mx-auto">
+    <section id="tab-sim"      class="tab-panel"></section>
+    <section id="tab-driver"   class="tab-panel hidden"></section>
+    <section id="tab-stint"    class="tab-panel hidden"></section>
+    <section id="tab-validate" class="tab-panel hidden"></section>
+    <section id="tab-lake"     class="tab-panel hidden"></section>
+  </main>
+
+  <script type="module" src="/static/modules/common.js"></script>
+  <script type="module" src="/static/modules/sim.js"></script>
+  <script type="module" src="/static/modules/driver.js"></script>
+  <script type="module" src="/static/modules/stint.js"></script>
+  <script type="module" src="/static/modules/validate.js"></script>
+  <script type="module" src="/static/modules/lake.js"></script>
+</body>
+</html>

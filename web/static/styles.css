@@ -1,0 +1,50 @@
+/* Minimal overrides on top of Tailwind CDN. */
+body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+
+.tab-btn.active { background-color: rgb(51 65 85); }
+.tab-panel { min-height: 60vh; }
+
+input, select, textarea {
+  background-color: rgb(30 41 59);
+  border: 1px solid rgb(71 85 105);
+  color: rgb(241 245 249);
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.5rem;
+}
+button.primary {
+  background-color: rgb(34 197 94);
+  color: rgb(0 0 0);
+  font-weight: 600;
+  padding: 0.4rem 0.9rem;
+  border-radius: 0.25rem;
+}
+button.primary:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.stage-chip {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0.5rem;
+  font-size: 0.75rem;
+  background: rgb(51 65 85);
+  margin-right: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+.stage-chip.done { background: rgb(22 101 52); }
+.stage-chip.err  { background: rgb(127 29 29); }
+
+table.grid { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+table.grid th, table.grid td {
+  border: 1px solid rgb(71 85 105);
+  padding: 0.25rem 0.5rem;
+}
+table.grid th { background: rgb(30 41 59); text-align: left; }
+
+pre.json-viewer {
+  background: rgb(15 23 42);
+  border: 1px solid rgb(51 65 85);
+  border-radius: 0.25rem;
+  padding: 0.5rem;
+  font-size: 0.8rem;
+  max-height: 60vh;
+  overflow: auto;
+}

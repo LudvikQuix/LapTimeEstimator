@@ -1,0 +1,3 @@
+lap,lap_time_s,tempFL_C,tempFR_C,tempRL_C,tempRR_C,wearFL_pct,wearFR_pct,wearRL_pct,wearRR_pct,pressureFL_psi,pressureFR_psi,pressureRL_psi,pressureRR_psi
+1,148.010,37.48,37.65,38.13,38.17,99.789,99.785,99.777,99.776,26.998,27.013,27.054,27.058
+2,147.179,45.45,45.73,46.53,46.61,99.580,99.573,99.556,99.554,27.690,27.715,27.785,27.791

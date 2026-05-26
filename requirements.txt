@@ -1,0 +1,16 @@
+# Runtime dependencies for the lap-time estimator core (src/lap_estimator).
+# v2 simulator + v3 slip model: numpy is enough.
+# v3.2 Phase 5.0 MPC controller (spec §23.2): adds osqp + scipy (sparse).
+#
+# Web UI (web/) and viz (viz/) have separate requirements files.
+# `pip install -r requirements.txt` covers the slip-sim CLI: `python lap.py ...`.
+
+numpy>=1.24,<3.0
+
+# Phase 5.0 MPC controller (BSD-3, pre-built Windows wheel; pulls scipy in).
+osqp>=1.0,<2.0
+scipy>=1.10,<2.0
+
+# Phase 5.2 HMPC outer planner (CasADi + IPOPT bundled wheel; LGPL/EPL).
+# Replaces the OSQP+SQP outer loop with a true nonlinear MPC.
+casadi>=3.6,<4.0

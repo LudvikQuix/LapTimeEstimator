@@ -1,0 +1,37 @@
+# Quix Cloud deployment manifest for the lap-estimator-web service.
+# Mirrors the deploy shape of ac-quix-bridge/telemetry-comparison.
+
+name: lap-estimator-web
+language: python
+runEntryPoint: web/main.py
+defaultFile: web/main.py
+
+# Build args: point Docker at the repo root so the COPY in web/Dockerfile picks
+# up src/ + cars_csv/ + tracks_csv/ + drivers/ + setups/ + samples/ alongside web/.
+build:
+  context: .
+  dockerfile: web/Dockerfile
+
+deployment:
+  serviceType: WebService
+  port: 8080
+  publicAccess: true
+  replicas: 1
+  resources:
+    cpu: 1
+    memory: 1Gi
+
+environment:
+  - name: QUIXLAKE_URL
+    inputType: Secret
+  - name: QUIX_LAKE_TOKEN
+    inputType: Secret
+  - name: TABLE_NAME
+    inputType: FreeText
+    value: ac_telemetry
+  - name: LOGLEVEL
+    inputType: FreeText
+    value: INFO
+  - name: LAP_ESTIMATOR_REPO_ROOT
+    inputType: FreeText
+    value: /app

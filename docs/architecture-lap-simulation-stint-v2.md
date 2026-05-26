@@ -278,6 +278,85 @@ match the pre-v2 baseline (§11.30, §11.31). Active-compound baselines for
 stint mode flow through `GripScaledCar(compound=...)` rather than mutating
 the `Car` instance.
 
+## v2.0.1 — universal velocity-continuity (2026-05-15)
+
+Spec §21.4 / Decisions item 26. Closes the bug where every lap of a stint
+started at `v = 0`, masking stint pace by giving every lap a standing-start
+lap-1 profile.
+
+### What
+
+`simulate(...)` gains a kwarg-only `v_initial: float = 0.0`. The value is
+threaded into `_three_pass(..., v_init=v_initial)` so the forward pass's first
+point is `min(v_corner[0], v_initial)` whenever `v_initial > v_min * 3`
+(otherwise the existing standing-start clamp `min(v_corner[0], v_min*3)`
+applies — identical to v1/v1.1/v1.2/v1.3).
+
+`simulate_stint(...)` initialises `v_prev_end = 0.0` before the lap loop, calls
+`simulate(..., v_initial=v_prev_end)` once per lap, and sets
+`v_prev_end = float(lap_result.speeds[-1])` after appending the per-lap result.
+Lap 1 runs with `v_prev_end == 0.0` (standing start, unchanged); lap N >= 2
+runs with `v_prev_end` = the last per-point speed sample of lap N-1 (flying
+lap).
+
+### Why
+
+- **Single seam.** Velocity continuity is a property of `simulate(...)`'s
+  forward pass. Threading a single kwarg through that one function (and
+  passing it from the one caller that needs the non-default value) is the
+  minimum surgical change. No new helper, no new state object, no per-lap
+  bookkeeping outside the existing loop.
+- **Default preserves byte-compat.** `v_initial = 0.0` matches the pre-patch
+  hard-coded `v_init = 0.0` in `_three_pass`. All standalone callers
+  (`simulate_monte_carlo`, `--laps 1`, direct external callers, the v1.1
+  two-lap tile path) are unaffected. §11.30 and §11.31 acceptance preserved.
+- **Two implementation paths, one rule.** The `n_laps == 2 && !measured`
+  fast path inside `simulate_stint` still delegates to `simulate(...,
+  two_lap=True)`, where the forward pass runs over a tiled grid and lap-2
+  velocity continuity emerges naturally from a single solver pass across the
+  start-finish boundary. That path is untouched. The explicit multi-lap loop
+  (every other case) achieves the same continuity by re-seeding each call.
+  §11.48 verifies the two paths agree on lap 2.
+- **Spec defines `v_end := speeds[-1]`.** No interpolation to the
+  start-finish line; the per-point grid (`ds = 2.0 m` by default) is dense
+  enough that the last sample is effectively at the line.
+
+### Edge case
+
+If `v_initial >= v_corner[0]` (the cornering-speed cap at the first segment),
+the forward pass naturally caps `v_forward[0] = min(v_corner[0], v_initial)`
+inside `_three_pass`. No special branch is needed. The backward (brake) pass
+then propagates that cap as usual.
+
+### Data flow (delta vs the diagram above)
+
+The lap loop now reads:
+
+```
+for lap k in 1..n_laps:
+    g_x, g_y, drag_scale = combined_envelope(state, model)
+    scaled_car = GripScaledCar(_DragScaledCar(car, drag_scale), g_x, g_y, ...)
+    lap_result = simulate(scaled_car, track, driver, two_lap=False,
+                          drag_scale=1.0, v_initial=v_prev_end)  # NEW kwarg
+    update_state_along_lap(state, lap_result, ...)
+    v_prev_end = float(lap_result.speeds[-1])                    # NEW assignment
+```
+
+### Modified files
+
+| Path | Change | Spec section |
+|------|--------|--------------|
+| `src/lap_estimator/simulator.py` | `simulate(...)` gains kwarg-only `v_initial: float = 0.0` (passed into `_three_pass`'s existing `v_init`). `simulate_stint(...)` lap loop seeds `v_prev_end = 0.0`, passes it into each per-lap `simulate(...)` call, and updates it to `lap_result.speeds[-1]` after each iteration. The `n_laps == 2 && !measured` fast path is unchanged. | §21.4, §11.47, §11.48, Decisions item 26 |
+
+### Acceptance results (Tomas / Sprint A / Semislicks / 33 psi / 26 °C)
+
+| Test | Result |
+|------|--------|
+| §11.30 (`--laps 1`) | 1:48.055 — byte-equal to v1.2.1 baseline (default 28 psi, no overrides) |
+| §11.31 (`--laps 2` default) | lap 1 1:48.055 / lap 2 1:44.016 — lap 1 matches §11.30 |
+| §11.47 (`--laps 3`, 33 psi, 26 °C) | lap 1 1:47.889 / lap 2 1:43.915 / lap 3 1:43.755 — lap 2 and 3 both flying; gap to lap 1 ~4 s |
+| §11.48 (`--laps 5` lap 2 vs `--laps 2` lap 2) | 1:43.915 vs 1:43.915 — exact match (Δ = 0.000 s, well within ±0.05 s) |
+
 ## How v2 integrates with neighboring features
 
 - **fit_driver.py** now optionally calibrates the four tyre-state knobs
