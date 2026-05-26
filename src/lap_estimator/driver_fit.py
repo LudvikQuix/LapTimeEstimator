@@ -473,3 +473,12 @@ def _normalise_frames(merged_frames):
     if isinstance(merged_frames, dict):
         return [merged_frames]
     return list(merged_frames)
+
+
+# ---------------------------------------------------------------------------
+# v3-aux (spec §22.B.5): high-level orchestration is in `driver_fit_pipeline`.
+# Re-exported here for callers that imported `FitStage` / `fit_driver_pipeline`
+# off `driver_fit`. New code should import directly from the pipeline module.
+# ---------------------------------------------------------------------------
+
+from .driver_fit_pipeline import FitStage, fit_driver_pipeline  # noqa: E402,F401

@@ -1,0 +1,82 @@
+{
+  "name": "ludvik",
+  "skill_pct": 1.0,
+  "consistency_sigma": 1.5,
+  "driver_tau_s": 0.036,
+  "trail_brake_m": 5.0,
+  "throttle_ramp_m": 56.78,
+  "control_params": {
+    "mpc": {
+      "dynamic_fz_enabled": true,
+      "cg_height_m": null,
+      "track_width_f_m": null,
+      "track_width_r_m": null,
+      "tier1": {
+        "blend_window_ticks": 5
+      }
+    }
+  },
+  "profile": {
+    "dynamic": {
+      "driver_tau_s": 0.036,
+      "trail_brake_m": 5.0,
+      "throttle_ramp_m": 56.78,
+      "pedal_press_rate_per_s": 11.1129,
+      "steering_aggression_deg_per_s": 14.76,
+      "measured": {
+        "driver_tau_s": true,
+        "pedal_press_rate_per_s": true,
+        "trail_brake_m": true,
+        "throttle_ramp_m": true,
+        "steering_aggression_deg_per_s": true
+      },
+      "sample_counts": {
+        "pedal_leading_edges": 86,
+        "brake_taper_segments": 78,
+        "throttle_ramp_segments": 71,
+        "steering_samples": 38485,
+        "steering_unit_detected": "rad"
+      }
+    }
+  },
+  "tyre_calibration": {
+    "k_friction": 0.1,
+    "h": 477.4963,
+    "C_thermal": 50000.0,
+    "k_wear": 3.414548873833601e-09,
+    "measured": true,
+    "source": {
+      "telemetry_csvs": [
+        "lake://ludvik/bmw_1m/ks_nurburgring/lap1",
+        "lake://ludvik/bmw_1m/ks_nurburgring/lap2",
+        "lake://ludvik/bmw_1m/ks_nurburgring/lap3"
+      ],
+      "compound": "Semislicks",
+      "fit_rmse_temp_C": 3.0626,
+      "fit_rmse_wear_pct": 0.0967,
+      "fit_rmse_pressure_psi": 0.4704,
+      "fitted_at": "2026-05-15T07:38:44Z"
+    }
+  },
+  "source": {
+    "telemetry_csvs": [
+      "lake://ludvik/bmw_1m/ks_nurburgring/lap1",
+      "lake://ludvik/bmw_1m/ks_nurburgring/lap2",
+      "lake://ludvik/bmw_1m/ks_nurburgring/lap3"
+    ],
+    "track_csv": "tracks_csv/ks_nurburgring/layout_sprint_a.csv",
+    "car_data_dir": "cars_csv/bmw_1m",
+    "n_laps": 3,
+    "n_finished_laps": 2,
+    "real_lap_times_s": [
+      241155.785,
+      241160.845
+    ],
+    "real_lap_time_s": 241158.315,
+    "pooled_sample_count": 23951,
+    "sim_lap_time_s": 102.886,
+    "delta_s": -241055.429,
+    "fitted_at": "2026-05-15T07:38:44Z",
+    "fit_version": "2"
+  }
+}

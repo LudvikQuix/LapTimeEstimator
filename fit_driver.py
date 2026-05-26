@@ -31,7 +31,7 @@ from lap_estimator.driver import (
     DEFAULT_TRAIL_BRAKE_M,
     Driver,
 )
-from lap_estimator.driver_fit import fit_driver
+from lap_estimator.driver_fit import fit_driver, fit_driver_pipeline
 from lap_estimator.simulator import simulate
 from lap_estimator.telemetry import (
     filter_to_lap,
@@ -64,6 +64,11 @@ def main():
     parser.add_argument("--laps-glob", default=None,
                         help="Glob pattern; expanded to the candidate-lap list. "
                              "Mutually exclusive with positional CSVs.")
+    parser.add_argument("--from-lake", default=None,
+                        help="Pull laps from QuixLake instead of local CSVs. "
+                             "Format: 'driver=<name>,car=<name>,track=<name>,n=<int>'. "
+                             "Requires QUIXLAKE_URL + QUIX_LAKE_TOKEN env vars. "
+                             "Mutually exclusive with positional CSVs and --laps-glob.")
     parser.add_argument("--newest", type=int, default=10,
                         help="Keep at most N newest-by-mtime candidate laps "
                              "(default 10, minimum effective 2).")
@@ -79,8 +84,16 @@ def main():
     if args.newest < 2:
         parser.error("--newest must be >= 2 (the >=2 laps guard would always trip).")
 
+    if args.from_lake and (args.laps_glob or args.telemetry):
+        parser.error(
+            "--from-lake is mutually exclusive with positional CSVs and --laps-glob."
+        )
     if args.laps_glob and args.telemetry:
         parser.error("--laps-glob is mutually exclusive with positional telemetry CSVs.")
+
+    if args.from_lake:
+        _run_from_lake(args)
+        return
 
     if args.laps_glob:
         candidates = sorted(_glob.glob(args.laps_glob))
@@ -421,6 +434,61 @@ def _fmt(seconds):
     m = int(seconds // 60)
     s = seconds - m * 60
     return f"{m}:{s:06.3f}"
+
+
+def _parse_from_lake_arg(spec: str) -> dict:
+    """Parse 'driver=...,car=...,track=...,n=...' into a kwargs dict for the pipeline."""
+    out = {"driver": None, "car": None, "track": None, "n_newest": 10}
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "=" not in token:
+            raise SystemExit(f"ERROR: --from-lake token '{token}' missing '='")
+        k, v = token.split("=", 1)
+        k = k.strip().lower()
+        v = v.strip()
+        if k == "n":
+            try:
+                out["n_newest"] = int(v)
+            except ValueError as e:
+                raise SystemExit(f"ERROR: --from-lake n='{v}' is not an int") from e
+        elif k in ("driver", "car", "track"):
+            out[k] = v
+        else:
+            raise SystemExit(f"ERROR: unknown --from-lake key '{k}'")
+    missing = [k for k in ("driver", "car", "track") if not out[k]]
+    if missing:
+        raise SystemExit(f"ERROR: --from-lake missing required keys: {missing}")
+    return out
+
+
+def _run_from_lake(args):
+    """Lake-mode entry point: consume the generator pipeline and print stages."""
+    lake_args = _parse_from_lake_arg(args.from_lake)
+    data_dir = find_car_data(args.car)
+    car = Car(data_dir)
+    track = Track.from_csv(args.track)
+    # Annotate Track with source path so the pipeline can record it.
+    track.source_path = args.track
+
+    overwrite = True  # CLI always overwrites (-i pattern not supported here).
+    try:
+        for stage in fit_driver_pipeline(
+            car, track,
+            output_json=args.output,
+            name=args.name,
+            lake_args=lake_args,
+            do_validate=not args.no_validate,
+            overwrite=overwrite,
+            ds=args.ds,
+            lap_choice=args.lap,
+        ):
+            print(f"[{stage.name}] {stage.payload}")
+    except (RuntimeError, ValueError, FileExistsError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+    print(f"Wrote: {args.output}")
 
 
 if __name__ == "__main__":

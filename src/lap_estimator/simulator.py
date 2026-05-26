@@ -1,4 +1,6 @@
-"""Point-mass lap time simulator.
+"""Point-mass kinematic model (v2 branch). For the slip-based dynamics model see src/lap_estimator/dynamics/.
+
+Point-mass lap time simulator.
 
 Uses the classic 3-pass approach:
   1. Per-point max cornering speed (lateral grip limit).
@@ -196,7 +198,7 @@ class _DragScaledCar:
 
 
 def simulate(car, track, driver=None, *, ds=2.0, rng=None, noise=False,
-             two_lap=True, drag_scale: float = 1.0):
+             two_lap=True, drag_scale: float = 1.0, v_initial: float = 0.0):
     """Run a single deterministic (or noisy) lap, optionally as a two-lap tiled run.
 
     `driver` is optional. When `None`, the raw `car` is used (skill_pct=1.0).
@@ -210,6 +212,16 @@ def simulate(car, track, driver=None, *, ds=2.0, rng=None, noise=False,
     (§11.30). When called from `simulate_stint`, the value comes from the
     third return of `tyre_state.combined_grip_envelope` and reflects the
     asymmetric pressure-drag model (`f_pressure_drag`).
+
+    v2.0.1 (spec §21.4 — universal velocity-continuity rule): `v_initial`
+    (kwarg-only, default `0.0`) seeds the forward pass's initial speed. Lap 1
+    of any stint stays at the default (`0.0` → standing start, identical
+    behaviour to v1/v1.1/v1.2/v1.3 and the v1.1 two-lap tile). `simulate_stint`
+    passes `v_initial=lap_(N-1).speeds[-1]` for laps 2..N so each lap starts
+    where the previous lap ended (flying laps). If `v_initial >= v_corner_max`
+    of the first segment, the forward pass naturally caps it at `v_corner[0]`
+    inside `_three_pass` — no special handling needed. Default `0.0` preserves
+    §11.30 / §11.31 byte-compat with all existing callers.
     """
     # v1.3 drag plumbing (spec §21.3 "Solver wiring"). Apply the drag wrapper
     # to the INNERMOST car so every downstream wrapper (`DriverScaledCar`,
@@ -250,7 +262,7 @@ def simulate(car, track, driver=None, *, ds=2.0, rng=None, noise=False,
         lap_id_full = np.ones(n_lap, dtype=int)
 
     speeds, labels, _, _, _ = _three_pass(
-        scaled, distances_full, radii_full, v_init=0.0, v_min=v_min,
+        scaled, distances_full, radii_full, v_init=float(v_initial), v_min=v_min,
     )
 
     # Integrate time (monotonic across the whole grid).
@@ -484,6 +496,12 @@ def simulate_stint(car, track, driver, *, n_laps: int, setup,
     lap_times: list[float] = []
     per_lap_results: list[SimResult] = []
     per_point_states: list = []
+    # v2.0.1 (spec §21.4): universal velocity-continuity. Lap 1 is a standing
+    # start (`v_prev_end == 0.0`); each subsequent lap inherits the previous
+    # lap's end-of-lap speed. The two-lap tile fast path below already enforces
+    # this via a single forward pass across the lap boundary, so this seed only
+    # affects the multi-lap explicit loop.
+    v_prev_end = 0.0
 
     # Back-compat fast path: n_laps == 2 + uncalibrated + default-compound -> v1.2.1 two-lap.
     use_back_compat = (
@@ -547,12 +565,21 @@ def simulate_stint(car, track, driver, *, n_laps: int, setup,
 
         # Run a single-lap solver pass. Passing `drag_scale=1.0` to `simulate`
         # avoids double-wrapping; the inner wrapper above already applied it.
+        # v2.0.1 (spec §21.4 step 2c): seed the forward pass with the previous
+        # lap's end-of-lap velocity. Lap 1: `v_prev_end == 0.0` (standing
+        # start). Lap N >= 2: `v_prev_end == lap_(N-1).speeds[-1]` so the new
+        # lap begins where the previous lap ended (flying lap). If
+        # `v_prev_end >= v_corner[0]`, the forward pass naturally caps it.
         lap_result = simulate(
             scaled_car, track, driver, ds=ds, two_lap=False,
-            drag_scale=1.0,
+            drag_scale=1.0, v_initial=v_prev_end,
         )
         per_lap_results.append(lap_result)
         lap_times.append(float(lap_result.lap_time))
+        # v2.0.1 (spec §21.4 step 2f): thread end-of-lap velocity into the
+        # next iteration. `speeds[-1]` is the last per-point sample of this
+        # lap, which the spec defines as "lap N-1's end-of-lap velocity".
+        v_prev_end = float(lap_result.speeds[-1])
 
         # Walk per-point arrays and update state in place. Snapshot per-point.
         n_pts = len(lap_result.distances)

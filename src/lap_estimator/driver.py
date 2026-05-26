@@ -135,6 +135,99 @@ class Driver:
             source=tc.get("source") if isinstance(tc.get("source"), dict) else {},
         )
 
+    def derived_slip_target_deg(self) -> float:
+        """Slip-angle target (deg) for the v3 controller (spec §23.10.5.2).
+
+        v3.1: derives the slip-target from the **argmax of the fitted
+        Pacejka lateral curve** (front axle) over a fine alpha grid. The
+        α_peak from a numerical argmax handles non-zero E values which
+        the old closed-form ``tan(pi/(2C))/B`` approximation got wrong
+        (the v3.0 fitter ships E≈-0.65 for Tomas; under-estimating α_peak
+        by ~20%).
+
+        New mapping: ``slip_target_deg = α_peak_front_deg *
+        (0.5 + 0.5 * skill_pct)``. Skill=1.0 → 100% of peak; skill=0.5 →
+        75%; skill=0.0 → 50%.
+
+        α_peak is clamped to [4°, 10°] before the skill mapping (risk #2
+        in spec §23.10.9: some fits land E ≈ -2.0 with α_peak at the
+        curve's monotonic edge).
+
+        Fallback (no pacejka_calibration, or unusable coefficients):
+        the v3.0 heuristic, linear interp from 1° (skill 0) to 6° (skill 1).
+
+        Override path: control_params.slip_target_deg (or legacy
+        slip_target_lat_deg) wins over both.
+
+        Both α_peak (front & rear) are cached on the Driver instance the
+        first time this method runs and lazily written into
+        ``raw['pacejka_calibration']['source']`` so downstream code can
+        read them without re-fitting (spec §23.10.5.3).
+        """
+        cp = self.raw.get("control_params") if isinstance(self.raw, dict) else None
+        if isinstance(cp, dict):
+            override = cp.get("slip_target_deg")
+            if override is None:
+                override = cp.get("slip_target_lat_deg")
+            if override is not None:
+                try:
+                    val = float(override)
+                    if val > 0:
+                        return val
+                except (TypeError, ValueError):
+                    pass
+
+        alpha_peak_front_deg = self._alpha_peak_front_deg()
+        if alpha_peak_front_deg is not None:
+            # Clamp before skill mapping (spec §23.10.9 risk #2).
+            apf_clamped = max(4.0, min(10.0, alpha_peak_front_deg))
+            skill = float(self.skill_pct)
+            return apf_clamped * (0.5 + 0.5 * skill)
+
+        skill = float(self.skill_pct)
+        return 6.0 * skill + 1.0 * (1.0 - skill)
+
+    def _alpha_peak_front_deg(self) -> float | None:
+        """Compute & cache α_peak (front, deg) from the fitted Pacejka curve.
+
+        Lazy + cached: first call computes via argmax of ``pacejka_lateral``
+        over α ∈ [0, 15°] at a representative Fz, then stores the result
+        on the Driver instance AND lazily augments
+        ``raw['pacejka_calibration']['source']`` with
+        ``alpha_peak_front_deg`` / ``alpha_peak_rear_deg`` so future loads
+        skip the recompute (spec §23.10.5.3). Returns ``None`` if the
+        Pacejka block is absent or unusable.
+        """
+        cached = getattr(self, "_alpha_peak_front_deg_cache", None)
+        if cached is not None:
+            return cached if cached > 0 else None
+
+        pacejka = self.raw.get("pacejka_calibration") if isinstance(self.raw, dict) else None
+        if not isinstance(pacejka, dict):
+            self._alpha_peak_front_deg_cache = -1.0
+            return None
+
+        front_lat = (pacejka.get("front") or {}).get("lateral") or {}
+        rear_lat = (pacejka.get("rear") or {}).get("lateral") or {}
+        apf = _argmax_alpha_peak_deg(front_lat)
+        apr = _argmax_alpha_peak_deg(rear_lat)
+        if apf is None:
+            self._alpha_peak_front_deg_cache = -1.0
+            return None
+
+        self._alpha_peak_front_deg_cache = float(apf)
+        if apr is not None:
+            self._alpha_peak_rear_deg_cache = float(apr)
+        # Lazy write into the source block so downstream consumers
+        # (web/UI, future fits) can read without recomputing. We only
+        # mutate the in-memory ``raw`` dict — not the file on disk.
+        src = pacejka.setdefault("source", {})
+        if isinstance(src, dict):
+            src.setdefault("alpha_peak_front_deg", float(apf))
+            if apr is not None:
+                src.setdefault("alpha_peak_rear_deg", float(apr))
+        return float(apf)
+
     @property
     def grip_sigma(self) -> float:
         """Per-point Gaussian sigma applied to grip during Monte-Carlo runs.
@@ -151,6 +244,49 @@ class Driver:
         clamped to a sane band.
         """
         return _DriverScaledCar(car, self, rng=rng, noise=noise)
+
+
+def _argmax_alpha_peak_deg(lat_block: dict) -> float | None:
+    """Numerical argmax of the Pacejka lateral curve over α ∈ [0, 15°].
+
+    ``lat_block`` is the ``{"B": ..., "C": ..., "D" or "D_per_Fz": ...,
+    "E": ...}`` dict for one axle's lateral coefficients. Uses a
+    representative Fz (median front-axle load for a 1.5 t car ≈ 4000 N);
+    α_peak is scale-free in Fz for the standard Magic Formula so the
+    exact Fz cancels — but we still pass one to keep the wrapper happy.
+
+    Returns ``None`` if any coefficient is missing or unusable.
+    """
+    if not isinstance(lat_block, dict):
+        return None
+    B = lat_block.get("B")
+    C = lat_block.get("C")
+    D = lat_block.get("D")
+    if D is None:
+        D = lat_block.get("D_per_Fz")
+    E = lat_block.get("E", 0.0)
+    try:
+        Bf = float(B)
+        Cf = float(C)
+        Df = float(D)
+        Ef = float(E) if E is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    if not (Bf > 0 and Cf > 0 and Df > 0):
+        return None
+
+    import numpy as np
+
+    from .dynamics.pacejka import pacejka_lateral
+
+    alphas_deg = np.linspace(0.0, 15.0, 601)  # 0.025° resolution
+    alphas_rad = np.radians(alphas_deg)
+    fy = pacejka_lateral(alphas_rad, 4000.0, Bf, Cf, Df, Ef)
+    fy_arr = np.asarray(fy, dtype=float)
+    if fy_arr.size == 0 or not np.isfinite(fy_arr).any():
+        return None
+    j = int(np.argmax(fy_arr))
+    return float(alphas_deg[j])
 
 
 def _resolve_field(

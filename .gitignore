@@ -221,6 +221,19 @@ tracks_csv/**/*__*_sim_vs_ai.png
 tracks_csv/**/*__*_sim_telemetry.csv
 tracks_csv/**/*__*_validation_bins.csv
 tracks_csv/**/*__*_validation_overlay.png
+tracks_csv/**/*_sim_trace_slip.csv
+tracks_csv/**/*_sim_vs_ai_slip.png
+tracks_csv/**/*_vs_real_*_overlay.png
+tracks_csv/**/*_prediction_telemetry.png
+tracks_csv/**/_diag_*.png
+
+# Playwright MCP cache
+.playwright-mcp/
+
+# Local scratch / backups
+scratch_*.py
+*.bak
+*.diag_bak
 
 # Pycache
 **/__pycache__/
