@@ -394,16 +394,25 @@ class DriverController:
         # we are about to hit, not the speed we're afraid of.
         v_target_local = float(self._speed[idx])
         v_preview = max(v, v_target_local)
-        brake_lookahead_m = max(30.0, v_preview * t_preview)
-        # Phase 4.1 step 2: brake whenever ``v > v_target_min`` over the
-        # preview window (pre-braking). This replaces the v3.0 reactive
-        # ``v > v_target_local`` brake trigger that only fired after the
-        # car had already passed the brake point. Throttle continues to
-        # target the **local** line speed so we still accelerate up to
-        # apex speed in fast sections — but throttle is gated off when
-        # the preview min is below current v (don't push throttle into
-        # a corner we know we have to brake for).
-        v_target_min = self._min_speed_within(idx, brake_lookahead_m)
+        # Adaptive (per-corner) brake-lookahead — spec reactive-adaptive-preview.
+        # `mode == "uniform"` (default) is the legacy path below, byte-identical
+        # to pre-spec behaviour. `mode == "adaptive"` derives the horizon from
+        # the physical braking distance for the upcoming speed drop.
+        if self.params.preview.mode == "adaptive":
+            brake_lookahead_m, v_target_min = self._adaptive_brake_lookahead(
+                idx, v, v_preview, t_preview,
+            )
+        else:
+            brake_lookahead_m = max(30.0, v_preview * t_preview)
+            # Phase 4.1 step 2: brake whenever ``v > v_target_min`` over the
+            # preview window (pre-braking). This replaces the v3.0 reactive
+            # ``v > v_target_local`` brake trigger that only fired after the
+            # car had already passed the brake point. Throttle continues to
+            # target the **local** line speed so we still accelerate up to
+            # apex speed in fast sections — but throttle is gated off when
+            # the preview min is below current v (don't push throttle into
+            # a corner we know we have to brake for).
+            v_target_min = self._min_speed_within(idx, brake_lookahead_m)
         e_v_throttle = v_target_local - v
         e_v_brake = v_target_min - v
         v_target = v_target_min  # "effective" target used by downstream slip-band logic
@@ -615,6 +624,80 @@ class DriverController:
         end_idx = int(np.searchsorted(self._ds, s_end))
         end_idx = max(idx + 1, min(end_idx, len(self._ds) - 1))
         return float(self._speed[idx:end_idx + 1].min())
+
+    def _min_speed_and_dist(
+        self, idx: int, lookahead_m: float,
+    ) -> tuple[float, float]:
+        """``_min_speed_within`` plus the along-line distance (m) to that min.
+
+        Used by the adaptive preview to anchor the physics horizon to where
+        the slow point actually is, so the horizon cannot collapse below the
+        distance still to run during a braking event.
+        """
+        s_here = float(self._ds[idx])
+        s_end = min(s_here + lookahead_m, self._total_len - 1e-3)
+        end_idx = int(np.searchsorted(self._ds, s_end))
+        end_idx = max(idx + 1, min(end_idx, len(self._ds) - 1))
+        window = self._speed[idx:end_idx + 1]
+        j = int(np.argmin(window))
+        v_min = float(window[j])
+        dist_to_min = float(self._ds[idx + j]) - s_here
+        return v_min, dist_to_min
+
+    def _adaptive_brake_lookahead(
+        self, idx: int, v: float, v_preview: float, t_preview: float,
+    ) -> tuple[float, float]:
+        """Per-corner physics-based brake lookahead (spec §5, Formulation 1).
+
+        Two-pass fixed-point resolution of the lookahead/v_min circularity:
+
+        1. **Seed pass** — a generous seed horizon (``seed_lookahead_m`` if
+           set, else the legacy uniform window ``max(floor, v_preview *
+           t_preview)``) guarantees the true downstream slow point is in view.
+        2. **Physics pass** — the braking distance ``safety_factor *
+           (v² − v_seed²)/(2·a_brake)``, floored at ``min_lookahead_m`` and
+           **clamped to the seed horizon** as an upper bound, then re-evaluate
+           the speed min over that tightened horizon.
+
+        **Distance-anchored physics horizon (deviation from a naive v²/2a
+        horizon).** The braking *distance* ``phys_la`` scales with ``v²`` but
+        the distance still to run to the slow point shrinks only linearly with
+        position. Mid-corner-entry, once the car has shed enough speed that the
+        raw ``phys_la`` drops below the distance still to run, a horizon that
+        used only the v²/2a number would let the apex fall out of view and
+        **release the brake too early**, leaving the car over-speed at the apex
+        (observed: abort at the s≈645 m hairpin on every config). We therefore
+        anchor the horizon to **where the seed's slow point actually is**: the
+        physics horizon is floored not only at ``min_lookahead_m`` but also at
+        the distance to the seed slow point *whenever the car is still faster
+        than that slow point* (``v > v_seed``). This keeps the apex in view for
+        the whole braking event (the spec's "never missing the slow point"
+        guarantee) while still letting the horizon — and therefore the brake
+        target — collapse to the floor on straights and fast corners where the
+        car is **not** faster than anything ahead (the adaptive pace win).
+        """
+        p = self.params.preview
+        floor = float(p.min_lookahead_m)
+        # Seed horizon: explicit override, else legacy uniform window.
+        if p.seed_lookahead_m is not None:
+            seed_horizon = max(floor, float(p.seed_lookahead_m))
+        else:
+            seed_horizon = max(floor, v_preview * t_preview)
+        # Seed pass: slow point + how far ahead it is.
+        v_seed, dist_to_seed_min = self._min_speed_and_dist(idx, seed_horizon)
+        # Physics pass: v²/2a braking distance for the seed speed drop.
+        delta = v * v - v_seed * v_seed
+        phys_la = p.safety_factor * delta / (2.0 * p.a_brake_avail_ms2)
+        lookahead_m = max(phys_la, floor)
+        # Anchor: while we are still over the upcoming slow point, never let the
+        # horizon fall short of where that slow point is, so the brake cannot
+        # release before the apex is cleared.
+        if v > v_seed:
+            lookahead_m = max(lookahead_m, dist_to_seed_min)
+        # Upper-bound by the seed horizon to keep the search bounded.
+        lookahead_m = min(lookahead_m, seed_horizon)
+        v_target_min = self._min_speed_within(idx, lookahead_m)
+        return lookahead_m, v_target_min
 
 
 # Backwards-compat re-export: the legacy ``ControlParams`` import path is

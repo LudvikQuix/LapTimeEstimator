@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ._control_params import ControlParams
+from ._dp_reference import DPLongitudinalReference
 from .driver_controller import DriverController
 from .hmpc_inner import (
     DEFAULT_HORIZON_M as DEFAULT_INNER_HORIZON_M,
@@ -132,6 +133,36 @@ HORIZON_END_MARGIN_M = 30.0
 # Tier-2 hysteresis-exit window (same convention as MPCC).
 N_TIER2_RECOVERY_HYSTERESIS = 5
 
+# Lever-3 a_long_ref source switch (task brief 2026-05-27). Selects where
+# the inner's longitudinal-accel reference comes from when ``inner_w_a > 0``:
+#   "outer" — outer NLP plan (ReferenceTrajectory.a_long_ref_at); default,
+#             bit-identical to the Phase 5.3 / Phase 2 ellipse-soft behaviour.
+#   "dp"    — the whole-lap DP plan's a_long(s) = v·dv/ds (longer look-ahead).
+#   "blend" — (1-α)·outer + α·dp, α = inner_a_long_ref_blend.
+A_LONG_REF_SOURCES = ("outer", "dp", "blend")
+DEFAULT_A_LONG_REF_SOURCE = "outer"
+DEFAULT_A_LONG_REF_BLEND = 0.5
+
+# Reference-source switch (ideal-line bypass spec 2026-05-27). Selects how the
+# inner tracker's four reference channels (n_ref, psi_e_ref, v_ref, a_long_ref)
+# are produced:
+#   "nlp"       — outer NLP plan + DP/outer a_long source (DEFAULT; bit-identical
+#                 to every prior build). The outer fires per cadence/overrun.
+#   "ideal_csv" — the outer NLP is NEVER fired; n_ref/psi_e_ref come from the
+#                 ideal-line CSV's Frenet projection onto the plant frame
+#                 (IdealLineFrenet), v_ref from the CSV speed_ms column, and
+#                 a_long_ref = v·dv/ds — all cached at construction. See
+#                 docs/architecture-v3-hmpc-ideal-line-bypass.md.
+REFERENCE_SOURCES = ("nlp", "ideal_csv")
+DEFAULT_REFERENCE_SOURCE = "nlp"
+
+# Sign-check zones for the one-time DP a_long verification (Sprint A
+# ideal-line). DP a_long must be negative in the threshold-brake zone and
+# positive on the main straight — a flip here brakes on straights and
+# accelerates into corners (the v_ref-lookahead inversion class of bug).
+_SIGN_CHECK_BRAKE_ZONE_M = (475.0, 585.0)
+_SIGN_CHECK_STRAIGHT_ZONE_M = (50.0, 200.0)
+
 # PI-trim defaults / class moved to hmpc_pi_trim.py for modularity
 # (spec §23.4.6.4). The defaults are re-exported here so the controller's
 # kwarg block stays self-contained.
@@ -195,10 +226,34 @@ class HMPCController:
         # mirrors the Phase 5.2 outer-pivot. Same return shape, same
         # interface; only the solver class changes.
         inner_solver: str = "osqp",
+        # Lever-3 a_long_ref source switch (task brief 2026-05-27). See
+        # docs/architecture-v3-hmpc-dp-along-ref.md and A_LONG_REF_SOURCES.
+        # ``None`` falls through to the driver-JSON value or the default.
+        inner_a_long_ref_source: str | None = None,
+        inner_a_long_ref_blend: float | None = None,
         slip_target_rad_override: float | None = None,
         line_xs: np.ndarray | None = None,
         line_ys: np.ndarray | None = None,
         debug_trace_path: str | None = None,
+        # Outer line-follow mode (task brief 2026-05-26). See
+        # docs/architecture-v3-hmpc-outer-line-following.md. Activated
+        # by supplying ``line_follow_path`` (or the same key under
+        # ``control_params.hmpc.line_follow.path`` in the driver JSON).
+        # ``"AUTO"`` triggers a noop+warn when the centerline CSV is
+        # already the ideal-line CSV.
+        line_follow_path: str | None = None,
+        line_follow_w_n_ideal: float | None = None,
+        line_follow_w_psi_ideal: float | None = None,
+        # Ideal-line bypass mode (spec dev-planning/hmpc-ideal-line-bypass,
+        # 2026-05-27). ``reference_source="ideal_csv"`` deletes the outer NLP
+        # from the loop and builds the inner reference straight from the
+        # ideal-line CSV (n/psi via IdealLineFrenet, v_ref from CSV speed_ms,
+        # a_long = v·dv/ds). DEDICATED plumbing — does NOT reuse the
+        # ``line_follow_path`` keys. See
+        # docs/architecture-v3-hmpc-ideal-line-bypass.md. ``None`` falls
+        # through to the driver-JSON value or the default ("nlp").
+        reference_source: str | None = None,
+        ideal_line_csv: str | None = None,
     ) -> None:
         if not getattr(track, "is_csv_backed", False):
             raise ValueError("HMPCController needs a CSV-backed track.")
@@ -216,6 +271,33 @@ class HMPCController:
         self._outer_disable = bool(outer_disable)
         # ---- Resolve driver-JSON block + per-knob defaults ----
         hmpc_block = _resolve_hmpc_block(driver)
+
+        # ---- Reference-source switch (ideal-line bypass spec 2026-05-27). ----
+        # Precedence: explicit kwarg > driver-JSON > default ("nlp"). In
+        # "ideal_csv" mode the outer NLP is never fired; we build the inner
+        # reference from the ideal-line CSV at construction (below, after the
+        # plant ReferencePath exists). Resolved here so the rest of __init__
+        # can branch on it.
+        ref_src = (
+            str(reference_source) if reference_source is not None
+            else str(hmpc_block.get("reference_source", DEFAULT_REFERENCE_SOURCE))
+        ).strip().lower()
+        if ref_src not in REFERENCE_SOURCES:
+            raise ValueError(
+                f"HMPCController: reference_source={ref_src!r} "
+                f"not in {REFERENCE_SOURCES}"
+            )
+        self._reference_source = ref_src
+        ideal_csv_path = (
+            ideal_line_csv if ideal_line_csv is not None
+            else hmpc_block.get("ideal_line_csv")
+        )
+        if ref_src == "ideal_csv" and not ideal_csv_path:
+            raise ValueError(
+                "HMPCController: reference_source='ideal_csv' requires an "
+                "ideal-line CSV path (--hmpc-ideal-line-csv or "
+                "control_params.hmpc.ideal_line_csv); none supplied."
+            )
 
         def _pick(arg, key, default):
             return float(arg) if arg is not None else float(hmpc_block.get(key, default))
@@ -323,8 +405,48 @@ class HMPCController:
         }
         if outer_vref_lookahead_v is not None:
             outer_cfg_kwargs["vref_lookahead_stages"] = outer_vref_lookahead_v
+
+        # Outer line-follow loader resolution (task brief 2026-05-26).
+        # Precedence: explicit kwarg > driver JSON block > disabled.
+        line_follow_block = hmpc_block.get("line_follow") or {}
+        if not isinstance(line_follow_block, dict):
+            line_follow_block = {}
+        lf_path_resolved = line_follow_path
+        if lf_path_resolved is None:
+            lf_path_resolved = line_follow_block.get("path")
+        lf_loader = None
+        lf_label = ""
+        if lf_path_resolved:
+            lf_loader, lf_label = self._resolve_line_follow_loader(
+                path_or_token=str(lf_path_resolved),
+                track=track,
+                center_ref=self.ref,
+            )
+        if lf_loader is not None:
+            outer_cfg_kwargs["line_follow"] = lf_loader
+            lf_w_n = (
+                float(line_follow_w_n_ideal)
+                if line_follow_w_n_ideal is not None
+                else float(line_follow_block.get("w_n_ideal", 200.0))
+            )
+            lf_w_psi = (
+                float(line_follow_w_psi_ideal)
+                if line_follow_w_psi_ideal is not None
+                else float(line_follow_block.get("w_psi_ideal", 20.0))
+            )
+            outer_cfg_kwargs["w_n_ideal"] = lf_w_n
+            outer_cfg_kwargs["w_psi_ideal"] = lf_w_psi
+            log.info(
+                "HMPC outer line-follow ENABLED: csv=%s, w_n_ideal=%.1f, "
+                "w_psi_ideal=%.1f (n_p95=%.2f m, n_max=%.2f m).",
+                lf_label, lf_w_n, lf_w_psi,
+                lf_loader.n_p95_m, lf_loader.n_max_m,
+            )
+
         outer_cfg = OuterPlannerConfig(**outer_cfg_kwargs)
         self.outer = OuterPlanner(self.ref, plan, self.pc, config=outer_cfg)
+        self._line_follow_loader = lf_loader
+        self._line_follow_label = lf_label
         self.outer_rate_hz = float(outer_rate_hz_v)
         self.outer_period_s = 1.0 / max(self.outer_rate_hz, 1e-3)
 
@@ -368,6 +490,19 @@ class HMPCController:
             # matches the previous hard-code).
             w_a=float(hmpc_block.get("inner_w_a", 0.0)),
             w_ellipse_soft=float(hmpc_block.get("inner_w_ellipse_soft", 5000.0)),
+            # v3.7 asymmetric-pedal cost knobs (CasADi inner only). All
+            # default to 0.0 — bit-identical to v3.6 when unset. See
+            # ``docs/architecture-v3-hmpc-inner-asymmetric-pedals.md``
+            # for tuning rationale and recommended sweep ranges.
+            w_du_brake=float(hmpc_block.get("inner_w_du_brake", 0.0)),
+            w_du_throttle=float(hmpc_block.get("inner_w_du_throttle", 0.0)),
+            w_brake_double_well=float(
+                hmpc_block.get("inner_w_brake_double_well", 0.0),
+            ),
+            w_throttle=float(hmpc_block.get("inner_w_throttle", 0.0)),
+            w_brake_throttle_overlap=float(
+                hmpc_block.get("inner_w_brake_throttle_overlap", 0.0),
+            ),
         )
         inner_cfg = InnerTrackerConfig(
             horizon_m=inner_horizon_m_v,
@@ -400,6 +535,42 @@ class HMPCController:
         self._tick_period = 1.0 / inner_cfg.tick_hz
         self._inner_n_stages = int(inner_cfg.n_stages)
         self._inner_ds_stage = float(inner_cfg.horizon_m / max(inner_cfg.n_stages, 1))
+
+        # ---- Lever-3 a_long_ref source switch (task brief 2026-05-27). ----
+        # Resolve source + blend (kwarg > driver JSON > default).
+        a_long_src = (
+            str(inner_a_long_ref_source) if inner_a_long_ref_source is not None
+            else str(hmpc_block.get("inner_a_long_ref_source", DEFAULT_A_LONG_REF_SOURCE))
+        ).strip().lower()
+        if a_long_src not in A_LONG_REF_SOURCES:
+            raise ValueError(
+                f"HMPCController: inner_a_long_ref_source={a_long_src!r} "
+                f"not in {A_LONG_REF_SOURCES}"
+            )
+        self._a_long_ref_source = a_long_src
+        self._a_long_ref_blend = float(
+            inner_a_long_ref_blend if inner_a_long_ref_blend is not None
+            else hmpc_block.get("inner_a_long_ref_blend", DEFAULT_A_LONG_REF_BLEND)
+        )
+        self._a_long_ref_blend = float(np.clip(self._a_long_ref_blend, 0.0, 1.0))
+        # Build the whole-lap DP a_long(s) = v·dv/ds reference once. Cheap
+        # (one np.gradient over the plan grid); only consulted when the
+        # source is "dp"/"blend" AND w_a > 0, but we build it unconditionally
+        # so the sign-check log fires on every HMPC build for diagnostics.
+        self._dp_along_ref = DPLongitudinalReference.from_plan(plan)
+        self._log_dp_along_sign_check()
+
+        # ---- Ideal-line bypass references (reference_source="ideal_csv"). ----
+        # Build the four-channel CSV reference once, against the PLANT
+        # ReferencePath (self.ref). n_ref/psi_e_ref come from the existing
+        # IdealLineFrenet loader (REUSE); v_ref/a_long from the new
+        # IdealLineSpeedReference. Both project onto the same plant-s grid, so
+        # all four channels are consistent. Arm A: plant=centerline -> non-zero
+        # offsets. Arm B: plant=ideal-line -> near-identity (n_ref~0).
+        self._ideal_frenet = None
+        self._ideal_speed = None
+        if self._reference_source == "ideal_csv":
+            self._build_ideal_csv_references(str(ideal_csv_path))
 
         # ---- PI trim. ----
         self._pi = PITrim(
@@ -475,15 +646,200 @@ class HMPCController:
             "HMPC built: outer=%.0f m / %d stages @ %.1f Hz "
             "(mu_circle=%.3f, w_progress=%.2f), inner=%.0f m / %d stages @ %.0f Hz "
             "(solver=%s), PI(Kp_n=%.3f,Kp_vx=%.3f, bound_steer=%.2f, bound_pedal=%.2f), "
-            "emit_source=%s, outer_disable=%s",
+            "emit_source=%s, a_long_ref_source=%s(blend=%.2f), outer_disable=%s",
             outer_horizon_m_v, outer_n_stages_v, self.outer_rate_hz,
             self.outer.mu_circle, outer_w_progress_v,
             inner_horizon_m_v, inner_n_stages_v, inner_tick_hz_v,
             self.inner_solver,
             pi_cfg.K_p_n, pi_cfg.K_p_vx,
             pi_cfg.bound_steer_frac, pi_cfg.bound_pedal_abs,
-            self.emit_source, self._outer_disable,
+            self.emit_source, self._a_long_ref_source, self._a_long_ref_blend,
+            self._outer_disable,
         )
+        if self._reference_source == "ideal_csv":
+            n_p95 = float(self._ideal_frenet.n_p95_m)
+            psi_p95 = float(np.quantile(
+                np.abs(self._ideal_frenet.psi_offset_ideal), 0.95,
+            ))
+            log.info(
+                "HMPC reference_source=ideal_csv: csv=%s, integrated lap est="
+                "%.2f s, n_ref p95=%.3f m (max=%.3f m), psi_e_ref p95=%.3f rad. "
+                "Outer NLP DISABLED for this run.",
+                self._ideal_speed.csv_path, self._ideal_speed.integrated_lap_s,
+                n_p95, float(self._ideal_frenet.n_max_m), psi_p95,
+            )
+
+    # ------------------------------------------------------------------
+    # Outer line-follow loader (task brief 2026-05-26).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_line_follow_loader(
+        *,
+        path_or_token: str,
+        track,
+        center_ref,
+    ):
+        """Build an :class:`IdealLineFrenet` loader, or None on no-op.
+
+        ``AUTO`` token:
+          - If the simulation track CSV path ends in ``_ideal_line.csv``
+            the simulation centerline IS already the ideal-line — adding
+            a line-follow cost would do nothing (the outer's ``n`` axis
+            is measured against the ideal-line geometry). Warn and
+            disable.
+          - Otherwise fall through to an "AUTO not resolvable" warning
+            (caller should pass an explicit path).
+
+        Returns ``(loader, label)`` where ``loader`` is None when the
+        mode is disabled.
+        """
+        from ._ideal_line_loader import load_ideal_line_frenet
+
+        token = str(path_or_token).strip()
+        if not token:
+            return None, ""
+        if token.upper() == "AUTO":
+            # Detect via the track's basename. ``Track.from_csv`` sets
+            # ``name`` to the file basename minus extension, so an
+            # ``..._ideal_line.csv`` track has ``name`` ending in
+            # ``_ideal_line``.
+            track_name = str(getattr(track, "name", "")).lower()
+            if track_name.endswith("_ideal_line"):
+                log.warning(
+                    "HMPC line-follow AUTO: simulation track '%s' is already "
+                    "the ideal-line CSV; line-follow would be a no-op. "
+                    "Disabling line-follow for this run.",
+                    track_name,
+                )
+                return None, f"AUTO[noop:{track_name}]"
+            log.warning(
+                "HMPC line-follow AUTO: simulation track '%s' is not an "
+                "ideal-line CSV. AUTO requires the path to be supplied "
+                "explicitly; disabling line-follow for this run.",
+                track_name,
+            )
+            return None, f"AUTO[unresolved:{track_name}]"
+
+        # Explicit path. Resolve relative to the repo cwd; if the user
+        # passed an absolute path, that takes precedence.
+        loader = load_ideal_line_frenet(token, center_ref)
+        return loader, token
+
+    # ------------------------------------------------------------------
+    # Ideal-line bypass reference build (spec 2026-05-27).
+    # ------------------------------------------------------------------
+
+    def _build_ideal_csv_references(self, csv_path: str) -> None:
+        """Build + cache the four-channel CSV reference for bypass mode.
+
+        ``n_ref``/``psi_e_ref`` come from :func:`load_ideal_line_frenet`
+        (REUSE), ``v_ref``/``a_long_ref`` from :func:`load_ideal_line_speed`.
+        Both project the ideal-line CSV onto the *plant* ``ReferencePath``
+        (``self.ref``), so the two grids share the same plant-``s`` axis and the
+        four channels are consistent. Raises (does NOT fall back to ``nlp``) if
+        the CSV is unresolvable. Runs the CSV ``a_long`` sign-check.
+        """
+        from ._ideal_line_loader import load_ideal_line_frenet
+        from ._ideal_line_speed import load_ideal_line_speed
+
+        self._ideal_frenet = load_ideal_line_frenet(csv_path, self.ref)
+        self._ideal_speed = load_ideal_line_speed(csv_path, self.ref)
+        # Contract (spec §7.2): the speed grid must equal the Frenet grid so
+        # all four channels are consistent at every s_seq. They are built from
+        # the identical projection + dedup; assert it to catch drift.
+        if not np.array_equal(self._ideal_frenet.s, self._ideal_speed.s_plant):
+            log.warning(
+                "HMPC ideal_csv: n_ref s-grid (%d pts) and v_ref s-grid (%d pts) "
+                "differ — channels may be misaligned; check _ideal_line_speed "
+                "dedup parity with _ideal_line_loader.",
+                len(self._ideal_frenet.s), len(self._ideal_speed.s_plant),
+            )
+        self._log_ideal_csv_sign_check()
+
+    def _log_ideal_csv_sign_check(self) -> None:
+        """Sign/frame check of the CSV-derived ``a_long`` (spec §7.3).
+
+        Reuses the Sprint A brake/straight zones: ``a_long`` must be negative in
+        the threshold-brake zone and ``>= 0`` on the main straight. WARNING (no
+        abort) on violation, since non-Sprint-A tracks may not have these zones.
+        """
+        spd = self._ideal_speed
+        s_grid = spd.s_plant
+        s_max = float(s_grid[-1])
+        bz0, bz1 = _SIGN_CHECK_BRAKE_ZONE_M
+        sz0, sz1 = _SIGN_CHECK_STRAIGHT_ZONE_M
+        if s_max < bz1 or s_max < sz1:
+            log.info(
+                "HMPC ideal_csv a_long sign-check skipped: track length %.0f m "
+                "too short for the Sprint A zones.", s_max,
+            )
+            return
+        brake_mask = (s_grid >= bz0) & (s_grid <= bz1)
+        straight_mask = (s_grid >= sz0) & (s_grid <= sz1)
+        a_brake = (
+            float(np.mean(spd.a_long[brake_mask])) if brake_mask.any()
+            else float("nan")
+        )
+        a_straight = (
+            float(np.mean(spd.a_long[straight_mask])) if straight_mask.any()
+            else float("nan")
+        )
+        ok = a_brake < 0.0 and a_straight >= 0.0
+        msg = (
+            "HMPC ideal_csv a_long sign-check: brake[%.0f-%.0f] mean=%.3f m/s² "
+            "(expect <0), straight[%.0f-%.0f] mean=%.3f m/s² (expect >=0) -> %s"
+        )
+        args = (bz0, bz1, a_brake, sz0, sz1, a_straight, "OK" if ok else "VIOLATION")
+        if ok:
+            log.info(msg, *args)
+        else:
+            log.warning(
+                msg + " — CSV a_long may have a sign/frame flip.", *args,
+            )
+
+    # ------------------------------------------------------------------
+    # Lever-3 DP a_long_ref sign check (task brief 2026-05-27).
+    # ------------------------------------------------------------------
+
+    def _log_dp_along_sign_check(self) -> None:
+        """One-time sign/frame verification of the DP plan's ``a_long(s)``.
+
+        DP ``a_long`` must be NEGATIVE in the threshold-brake zone and
+        POSITIVE on the main straight. A flip would brake on straights and
+        accelerate into corners — the same class of bug as the
+        v_ref-lookahead inversion in the Phase 5.3 close-out. We log a
+        WARNING if the convention is violated rather than aborting, since
+        non-Sprint-A tracks may not have these exact zones.
+        """
+        ref = self._dp_along_ref
+        s_max = float(ref.s_grid[-1])
+        bz0, bz1 = _SIGN_CHECK_BRAKE_ZONE_M
+        sz0, sz1 = _SIGN_CHECK_STRAIGHT_ZONE_M
+        if s_max < bz1 or s_max < sz1:
+            log.info(
+                "HMPC DP a_long sign-check skipped: track length %.0f m too "
+                "short for the Sprint A zones (brake %.0f-%.0f, straight "
+                "%.0f-%.0f).", s_max, bz0, bz1, sz0, sz1,
+            )
+            return
+        brake_mask = (ref.s_grid >= bz0) & (ref.s_grid <= bz1)
+        straight_mask = (ref.s_grid >= sz0) & (ref.s_grid <= sz1)
+        a_brake = float(np.mean(ref.a_long[brake_mask])) if brake_mask.any() else float("nan")
+        a_straight = (
+            float(np.mean(ref.a_long[straight_mask])) if straight_mask.any() else float("nan")
+        )
+        ok = a_brake < 0.0 and a_straight >= 0.0
+        msg = (
+            "HMPC DP a_long sign-check: brake-zone[%.0f-%.0f] mean=%.3f m/s² "
+            "(expect <0), straight[%.0f-%.0f] mean=%.3f m/s² (expect >=0) -> %s"
+        )
+        args = (bz0, bz1, a_brake, sz0, sz1, a_straight, "OK" if ok else "VIOLATION")
+        if ok:
+            log.info(msg, *args)
+        else:
+            log.warning(msg + " — DP a_long may have a sign/frame flip; "
+                        "check before trusting inner_a_long_ref_source=dp/blend.", *args)
 
     # ------------------------------------------------------------------
     # Public surface — parity with MPCController / MPCCController.
@@ -624,7 +980,13 @@ class HMPCController:
         )
 
         # ---- (a) Outer cadence + forced-re-solve trigger ----
+        # In ideal_csv bypass mode the outer NLP is NEVER fired; the inner
+        # reference is the construction-time CSV reference. Skip the whole
+        # outer block (no IPOPT, no cadence/overrun bookkeeping).
         outer_fired = False
+        if self._reference_source == "ideal_csv":
+            self._resolve_ideal_csv(state, t, s_now, n_now, e_psi_now)
+            return
         outer_due = (t - self._last_outer_t) >= self.outer_period_s
         outer_overrun = (
             self._reference is not None
@@ -705,10 +1067,10 @@ class HMPCController:
                 # ``a_long_ref`` at the inner stage grid. Inner cost
                 # ignores this sequence when ``weights.w_a == 0`` so
                 # callers without the tune see bit-identical behaviour.
-                a_long_ref_seq = np.array(
-                    [self._reference.a_long_ref_at(s) for s in s_seq],
-                    dtype=float,
-                )
+                # Task brief 2026-05-27: the source is switchable between
+                # the short-horizon outer NLP plan and the whole-lap DP
+                # plan (longer look-ahead) — see _resolve_a_long_ref.
+                a_long_ref_seq = self._resolve_a_long_ref(s_seq)
                 self._latest_tick_tier = TIER_HMPC
                 self._outer_inner_dv_hist.append(
                     float(np.max(np.abs(v_ref_seq - v_dp_seq))),
@@ -827,6 +1189,161 @@ class HMPCController:
             })
 
     # ------------------------------------------------------------------
+    # Ideal-line bypass tick (spec 2026-05-27).
+    # ------------------------------------------------------------------
+
+    def _resolve_ideal_csv(
+        self,
+        state: VehicleState,
+        t: float,
+        s_now: float,
+        n_now: float,
+        e_psi_now: float,
+    ) -> None:
+        """One inner tick in bypass mode — outer NLP never fired.
+
+        Fills all four inner reference channels from the construction-time
+        CSV references (Tier-0). Tier-1 (DP-plan inner fallback) and Tier-2
+        (reactive) are UNCHANGED: on inner infeasibility we retry with the DP
+        plan ``v_dp_seq`` exactly as the nlp path does, and escalate to Tier-2
+        after two consecutive infeasible ticks.
+        """
+        # ---- (b) Inner stage grid + CSV reference samples (Tier-0) ----
+        s_seq = s_now + np.arange(self._inner_n_stages) * self._inner_ds_stage
+        s_seq = np.clip(s_seq, 0.0, max(self.ref.total_length - 1e-3, 0.0))
+        kappa_seq, v_dp_seq, _ = sample_seq(s_seq, self.ref)
+        # DP plan v_ref retained ONLY for the Tier-1 fallback (spec §8). The
+        # Tier-0 v_ref is the CSV speed column — never DP-capped (spec §5.1).
+        v_dp_seq = np.maximum(v_dp_seq, self.bounds.vx_min + 0.1)
+
+        # Tier-0 reference: CSV speed/accel + ideal-line Frenet offsets.
+        v_ref_seq = np.maximum(
+            self._ideal_speed.v_seq(s_seq), self.bounds.vx_min + 0.1,
+        )
+        a_long_ref_seq = self._ideal_speed.a_long_seq(s_seq)
+        n_ref_seq = self._ideal_frenet.n_seq(s_seq)
+        psi_e_ref_seq = self._ideal_frenet.psi_seq(s_seq)
+        self._latest_tick_tier = TIER_HMPC
+
+        # ---- (c) Inner initial state (same layout as the nlp path) ----
+        x0 = np.array([
+            float(n_now),
+            float(e_psi_now),
+            float(state.v_x),
+            float(state.v_y),
+            float(state.omega_yaw),
+            float(self._actuator_delta),
+            float(self._actuator_throttle),
+            float(self._actuator_brake),
+        ], dtype=float)
+
+        # ---- (d) Inner solve (Tier-0: CSV reference) ----
+        u_prev = self._u_seq_prev[0]
+        result = self.inner.solve(
+            x0=x0,
+            kappa_seq=kappa_seq,
+            v_ref_seq=v_ref_seq,
+            n_ref_seq=n_ref_seq,
+            psi_e_ref_seq=psi_e_ref_seq,
+            u_prev=u_prev,
+            a_long_ref_seq=a_long_ref_seq,
+        )
+        if result.infeasible:
+            self._inner_consec_infeas += 1
+            # Tier-1 retry: inner tracks the DP plan only (no lateral/accel
+            # offsets) — the "safe slow" reference (spec §8). Same mechanism
+            # as the nlp path's hmpc_controller.py:966 retry.
+            result_retry = self.inner.solve(
+                x0=x0,
+                kappa_seq=kappa_seq,
+                v_ref_seq=v_dp_seq,
+                n_ref_seq=None, psi_e_ref_seq=None,
+                u_prev=u_prev,
+                a_long_ref_seq=None,
+            )
+            if not result_retry.infeasible:
+                result = result_retry
+                self._latest_tick_tier = TIER_DP_INNER
+                self._inner_consec_infeas = 0
+                v_ref_seq = v_dp_seq
+            if result.infeasible and self._inner_consec_infeas >= 2:
+                self._enter_tier2(t, reason="inner-infeasible-x2")
+                self._latest_tick_tier = TIER_REACTIVE
+                return
+        else:
+            self._inner_consec_infeas = 0
+
+        # ---- (e) Commit first-stage rate-controls ----
+        self._u_seq_prev = result.u_seq
+        new_delta, new_thr, new_brk = first_stage_commit(
+            result.u_seq,
+            actuator_delta=self._actuator_delta,
+            actuator_throttle=self._actuator_throttle,
+            actuator_brake=self._actuator_brake,
+            bounds=self.bounds,
+            ds_stage=self._inner_ds_stage,
+            v_lin_first=float(v_ref_seq[0]),
+            tick_period=self._tick_period,
+        )
+        if float(state.v_x) < 1.0 and float(v_ref_seq[0]) > 2.0:
+            new_thr = 1.0
+            new_brk = 0.0
+        new_thr, new_brk = _suppress_pedal_overlap(new_thr, new_brk, self.pc)
+        self._actuator_delta = new_delta
+        self._actuator_throttle = new_thr
+        self._actuator_brake = new_brk
+        self._held_steer_rad = new_delta
+        self._held_throttle = new_thr
+        self._held_brake = new_brk
+
+        # ---- (f) Optional debug trace (no outer reference to dereference) ----
+        if self._debug_trace_path is not None:
+            self._debug_rows.append({
+                "t": float(t),
+                "s": float(s_now),
+                "v_x": float(state.v_x),
+                "outer_age_ticks": 0,
+                "outer_fired": 0,
+                "v_ref_at_s": float(self._ideal_speed.v_at(s_now)),
+                "n_ref_at_s": float(self._ideal_frenet.n_at(s_now)),
+                "thr_inner_emit": float(new_thr),
+                "brk_inner_emit": float(new_brk),
+                "tier": int(self._latest_tick_tier),
+                "inner_solve_ms": float(result.solve_time_s * 1000.0),
+            })
+
+    # ------------------------------------------------------------------
+    # Lever-3 a_long_ref source resolution (task brief 2026-05-27).
+    # ------------------------------------------------------------------
+
+    def _resolve_a_long_ref(self, s_seq: np.ndarray) -> np.ndarray:
+        """Sample the inner's ``a_long_ref`` sequence per the source switch.
+
+        Called only on the Tier-0 (HMPC) path, where a valid outer
+        ``ReferenceTrajectory`` exists and covers ``s_seq``. Both the outer
+        NLP ``a_long`` and the DP ``a_long`` share sign/frame convention
+        (decel negative; longitudinal accel along the path), verified at
+        build time by :meth:`_log_dp_along_sign_check`.
+
+        - ``"outer"``: outer NLP plan (unchanged Phase 5.3 behaviour).
+        - ``"dp"``: whole-lap DP plan ``a_long(s) = v·dv/ds``.
+        - ``"blend"``: ``(1-α)·outer + α·dp`` with ``α = blend``.
+        """
+        if self._a_long_ref_source == "outer":
+            return np.array(
+                [self._reference.a_long_ref_at(s) for s in s_seq], dtype=float,
+            )
+        dp_seq = self._dp_along_ref.sample(s_seq)
+        if self._a_long_ref_source == "dp":
+            return dp_seq
+        # "blend"
+        outer_seq = np.array(
+            [self._reference.a_long_ref_at(s) for s in s_seq], dtype=float,
+        )
+        alpha = self._a_long_ref_blend
+        return (1.0 - alpha) * outer_seq + alpha * dp_seq
+
+    # ------------------------------------------------------------------
     # Per-step emit (between MPC ticks).
     # ------------------------------------------------------------------
 
@@ -846,7 +1363,13 @@ class HMPCController:
             (throttle, brake) + PI trim. Legacy "spec literal" path.
         """
         # PI trim — compute against the current frozen reference (if any).
-        if self._reference is not None and not self._outer_disable:
+        if self._reference_source == "ideal_csv":
+            # Bypass mode: no outer ReferenceTrajectory exists. Trim against the
+            # CSV reference (ideal-line n offset + CSV speed) so the trim does
+            # not fight the bypass target back to centerline (Arm A) / DP pace.
+            e_n = float(n_now - self._ideal_frenet.n_at(s_now))
+            e_vx = float(state.v_x - self._ideal_speed.v_at(s_now))
+        elif self._reference is not None and not self._outer_disable:
             e_n = float(n_now - self._reference.n_ref_at(s_now))
             e_vx = float(state.v_x - self._reference.v_ref_at(s_now))
         else:

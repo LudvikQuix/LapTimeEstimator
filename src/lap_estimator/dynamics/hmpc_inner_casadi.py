@@ -75,6 +75,7 @@ import casadi as ca
 import numpy as np
 
 from .hmpc_inner import InnerSolveResult, InnerTrackerConfig
+from .hmpc_inner_cost import stage_pedal_shape_cost, stage_rate_cost
 from .mpc_model import NU, NX, V_FLOOR
 from .mpc_qp import MPCBounds, MPCWeights
 
@@ -462,18 +463,29 @@ class CasadiInnerTracker:
                 J += weights.w_a * p_a_long_mask[k] * (
                     a_long_k - p_a_long_ref[k]
                 ) ** 2
-            # Rate-of-control penalty.
-            if k == 0:
-                du0 = U[:, 0] - p_u_prev
-                J += weights.w_du * ca.sumsqr(du0)
-            else:
-                J += weights.w_du * ca.sumsqr(U[:, k] - U[:, k - 1])
+            # Rate-of-control penalty. v3.7 (chase-Tomas brake bang-bang
+            # fix): split per-channel via :func:`stage_rate_cost`. At
+            # default weights (``w_du_brake = w_du_throttle = 0.0``) the
+            # term equals the legacy ``w_du · sumsqr(U[:,k] - U[:,k-1])``
+            # so pre-v3.7 builds are bit-identical. Set
+            # ``w_du_brake = 0.1`` + ``w_du_throttle = 10.0`` to enforce
+            # the bang-bang-brake / smooth-throttle asymmetry from the
+            # task brief.
+            J += stage_rate_cost(weights, U, k, p_u_prev)
             # Rate-of-rate (curvature of input) penalty — uses a
             # 3-stage stencil so k=0,1 are skipped (matches v3.2's
-            # w_du2 term which also skips the first two stages).
+            # w_du2 term which also skips the first two stages). Kept
+            # combined across channels; the asymmetry is captured in
+            # the rate-of-control term above. Lower if a future tune
+            # wants snappier brake-snap behaviour.
             if k >= 2:
                 d2u = U[:, k] - 2.0 * U[:, k - 1] + U[:, k - 2]
                 J += weights.w_du2 * ca.sumsqr(d2u)
+            # v3.7 asymmetric pedal-shape cost — adds three optional
+            # terms (brake double-well, throttle², brake·throttle
+            # overlap). At default zeros this returns MX(0.0). See
+            # :mod:`hmpc_inner_cost` for the shape rationale.
+            J += stage_pedal_shape_cost(weights, X, k)
 
         # Terminal-stage bounds — same soft-penalty pattern as per-stage.
         d_over_up = ca.fmax(0.0, X[5, N] - delta_max)
@@ -493,6 +505,10 @@ class CasadiInnerTracker:
         J += weights.w_term * (X[0, N] ** 2 + X[1, N] ** 2)
         # Also pull v_x toward the last v_ref entry (continuous extension).
         J += weights.w_v * (X[2, N] - p_v_ref[N - 1]) ** 2
+        # v3.7: apply the pedal-shape cost at the terminal actuator-
+        # memory state too, so the {0, 1}-pull doesn't trail off at the
+        # horizon tail. No-op when the knobs are at defaults.
+        J += stage_pedal_shape_cost(weights, X, N)
 
         opti.minimize(J)
 

@@ -93,7 +93,12 @@ import numpy as np
 from .mpcc_reference import ReferencePath, sample_seq
 
 if TYPE_CHECKING:
+    from ._ideal_line_loader import IdealLineFrenet as _IdealLineFrenetProtocol
     from .mpc_model import PlantConstants
+else:
+    # Avoid a runtime import cycle and keep the dataclass field
+    # type-hint resolvable when the loader isn't on the import path.
+    _IdealLineFrenetProtocol = object  # noqa: N816
 
 
 log = logging.getLogger(__name__)
@@ -234,6 +239,22 @@ class ReferenceTrajectory:
         ))
 
 
+# Default weights for the line-follow mode (2026-05-26 task brief).
+# When ``line_follow`` is enabled the outer's centerline pull (``w_n``)
+# is suppressed and replaced by a quadratic ``(n_k − n_ideal(s_k))²``
+# cost. ``w_n_ideal`` is the headline knob; ``w_psi_ideal`` keeps the
+# planned heading aligned with the ideal-line tangent (smaller effect
+# but helps the inner's heading-tracking cost stay consistent).
+#
+# Magnitudes picked so that at the chicane (centerline-to-ideal-line
+# offset ~3-5 m on Sprint A) the line-follow cost dominates the
+# progress and v_v terms but stays below the friction-circle bind.
+# Tuning sweep in the architecture doc starts at 200 (strong) and
+# loosens.
+DEFAULT_W_N_IDEAL = 200.0
+DEFAULT_W_PSI_IDEAL = 20.0
+
+
 @dataclass
 class OuterPlannerConfig:
     """Tunables for :class:`OuterPlanner`. Spec §23.4.7.3 defaults."""
@@ -262,6 +283,21 @@ class OuterPlannerConfig:
     # brake-signal forward without the sign-inversion of the legacy
     # left-shift.
     vref_lookahead_stages: int = DEFAULT_VREF_LOOKAHEAD_STAGES
+    # Outer line-follow mode (task brief 2026-05-26). When the loader
+    # is non-None the per-stage cost adds
+    #   J_line = w_n_ideal · (n_k − n_ideal(s_k))²
+    #          + w_psi_ideal · (ψ_e_k − psi_ideal(s_k))²
+    # and the centerline-pull ``w_n · n_k²`` / ``w_psi · ψ_e_k²`` / the
+    # terminal ``w_term · n_N²`` terms are dropped (the ideal-line target
+    # IS the planner's lateral reference; pulling toward the centerline
+    # AND the ideal line at the same time is incoherent). The friction
+    # circle, track-edge, and curvature-velocity constraints are
+    # unchanged — so the outer still respects the physical envelope, it
+    # just optimises only the longitudinal profile along the supplied
+    # line. See docs/architecture-v3-hmpc-outer-line-following.md.
+    line_follow: "_IdealLineFrenetProtocol | None" = None
+    w_n_ideal: float = DEFAULT_W_N_IDEAL
+    w_psi_ideal: float = DEFAULT_W_PSI_IDEAL
 
 
 class OuterPlannerError(RuntimeError):
@@ -574,6 +610,31 @@ class OuterPlanner:
         w_du = float(self.cfg.w_du)
         w_term = float(self.cfg.w_term)
 
+        # Outer line-follow mode (task brief 2026-05-26). Precompute the
+        # ideal-line targets on the stage grid; the per-stage cost adds
+        # the soft pull and drops the centerline pulls (set to 0).
+        line_follow = self.cfg.line_follow
+        if line_follow is not None:
+            n_ideal_seq = np.asarray(line_follow.n_seq(s_grid), dtype=float)
+            psi_ideal_seq = np.asarray(line_follow.psi_seq(s_grid), dtype=float)
+            w_n_ideal_eff = float(self.cfg.w_n_ideal)
+            w_psi_ideal_eff = float(self.cfg.w_psi_ideal)
+            # Suppress the centerline-pull terms — the ideal-line cost
+            # IS the lateral reference. Keeping w_n = w_psi > 0 here
+            # would yank the planner toward two competing references at
+            # once and ruin the line-follow signal.
+            w_n_eff = 0.0
+            w_psi_eff = 0.0
+            w_term_eff = 0.0
+        else:
+            n_ideal_seq = None
+            psi_ideal_seq = None
+            w_n_ideal_eff = 0.0
+            w_psi_ideal_eff = 0.0
+            w_n_eff = w_n
+            w_psi_eff = w_psi
+            w_term_eff = w_term
+
         J = 0.0
         for k in range(N):
             s_k = float(s_grid[k])
@@ -607,8 +668,13 @@ class OuterPlanner:
             # nothing pushed the planner toward higher v on straights.
             J += w_p * dt_k
             J += w_v * (v_var[k] - float(v_ref_center[k])) ** 2
-            J += w_n * n_var[k] ** 2
-            J += w_psi * psi_var[k] ** 2
+            J += w_n_eff * n_var[k] ** 2
+            J += w_psi_eff * psi_var[k] ** 2
+            if line_follow is not None:
+                n_id_k = float(n_ideal_seq[k])
+                psi_id_k = float(psi_ideal_seq[k])
+                J += w_n_ideal_eff * (n_var[k] - n_id_k) ** 2
+                J += w_psi_ideal_eff * (psi_var[k] - psi_id_k) ** 2
             if k > 0:
                 J += w_du * ((a_long[k] - a_long[k - 1]) ** 2
                              + (a_lat[k] - a_lat[k - 1]) ** 2)
@@ -645,8 +711,13 @@ class OuterPlanner:
             v_cap_corner_N = ((KAPPA_V_CAP_FRAC * mu_g)
                               / abs(kappa_N_np)) ** 0.5
             opti.subject_to(v_var[N] <= v_cap_corner_N)
-        J += w_term * n_var[N] ** 2
+        J += w_term_eff * n_var[N] ** 2
         J += w_v * (v_var[N] - float(v_ref_center[N])) ** 2
+        if line_follow is not None:
+            n_id_N = float(n_ideal_seq[N])
+            psi_id_N = float(psi_ideal_seq[N])
+            J += w_n_ideal_eff * (n_var[N] - n_id_N) ** 2
+            J += w_psi_ideal_eff * (psi_var[N] - psi_id_N) ** 2
 
         opti.minimize(J)
 
@@ -758,8 +829,28 @@ class OuterPlanner:
         # --- Cold-start arrays ---
         v_cold = np.maximum(np.asarray(v_dp_seq, dtype=float), V_FLOOR)
         v_cold[0] = max(float(v0), V_FLOOR)
-        n_cold = np.linspace(float(n0), 0.0, N + 1)
-        psi_cold = np.linspace(float(psi_e0), 0.0, N + 1)
+        # Line-follow mode: cold-start n/psi from the ideal line rather
+        # than the centerline so IPOPT starts near the soft-pull
+        # minimum instead of having to drive (N+1) stages of n_k from 0
+        # to several meters across its first iteration.
+        line_follow = self.cfg.line_follow
+        if line_follow is not None:
+            n_ideal_cold = np.asarray(
+                line_follow.n_seq(s_grid), dtype=float,
+            )
+            psi_ideal_cold = np.asarray(
+                line_follow.psi_seq(s_grid), dtype=float,
+            )
+            # Blend the chassis's actual n0/psi_e0 into stage 0 (the
+            # initial-state pin will enforce stage 0 anyway, but giving
+            # IPOPT the actual value avoids a residual at iteration 0).
+            n_cold = n_ideal_cold.copy()
+            n_cold[0] = float(n0)
+            psi_cold = psi_ideal_cold.copy()
+            psi_cold[0] = float(psi_e0)
+        else:
+            n_cold = np.linspace(float(n0), 0.0, N + 1)
+            psi_cold = np.linspace(float(psi_e0), 0.0, N + 1)
         if N >= 1:
             dv = np.diff(v_cold) / max(ds, 1e-3)
             a_long_cold = v_cold[:N] * dv[:N]

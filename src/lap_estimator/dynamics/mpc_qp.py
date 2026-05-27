@@ -89,6 +89,39 @@ class MPCWeights:
     # pre-tune hard-code.
     w_a: float = 0.0
     w_ellipse_soft: float = 5000.0
+    # v3.7 asymmetric-pedal cost (CasADi inner only; ignored by the OSQP
+    # path). The chase-Tomas ceiling at 2:28.88 was traced to the
+    # symmetric quadratic on the combined ``u_long`` rate-control vector
+    # which pulls brake away from 1.0 the same way it pulls throttle away
+    # from 1.0 — wrong for real driving where brake is bang-bang and
+    # throttle progressive. These knobs split the cost shape per channel.
+    #
+    #   ``w_du_brake``    : quadratic penalty on Δbrake/Δt. **Loose**
+    #     default (1.0) so brake can snap 0→1 / 1→0. When None / 0.0,
+    #     the legacy combined ``w_du`` covers brake_dot.
+    #   ``w_du_throttle`` : quadratic penalty on Δthrottle/Δt. **Heavy**
+    #     default-when-enabled (10.0); enforces progressive tip-in.
+    #     When None / 0.0 falls back to ``w_du``.
+    #   ``w_brake_double_well`` : penalty ``brake · (1 - brake)`` per
+    #     stage. Concave, [0, 0.25], maxes at brake=0.5. Pushes the
+    #     optimiser to a {0, 1} extreme. Default 0.0 = off (legacy).
+    #   ``w_throttle``    : quadratic penalty on absolute throttle.
+    #     Light (default 0.0) — encourages WOT on straights without
+    #     contesting the friction circle.
+    #   ``w_brake_throttle_overlap`` : penalty ``brake · throttle``
+    #     per stage. Soft pseudo-complementarity; discourages co-
+    #     activation without a hard constraint. Default 0.0 = off
+    #     (legacy combined symmetric path).
+    #
+    # When all five are 0.0 the cost function is bit-identical to the
+    # pre-v3.7 CasADi inner; the only diff is the rate-penalty splits
+    # use ``w_du`` (default 0.1) on each channel, which equals the
+    # combined ``sumsqr(U[:,k]-U[:,k-1])`` term up to integration.
+    w_du_brake: float = 0.0
+    w_du_throttle: float = 0.0
+    w_brake_double_well: float = 0.0
+    w_throttle: float = 0.0
+    w_brake_throttle_overlap: float = 0.0
 
 
 @dataclass

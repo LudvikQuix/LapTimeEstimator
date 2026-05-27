@@ -24,7 +24,8 @@
       "Bash(git rm:*)",
       "Bash(git add:*)",
       "Bash(git checkout:*)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(powershell -Command \"Get-ChildItem docs/architecture-v3-hmpc-*.md, src/lap_estimator/dynamics/_dp_reference.py, src/lap_estimator/dynamics/_ideal_line_loader.py, src/lap_estimator/dynamics/hmpc_inner_cost.py | Sort-Object LastWriteTime | Format-Table LastWriteTime, Length, FullName -AutoSize\")"
     ]
   }
 }

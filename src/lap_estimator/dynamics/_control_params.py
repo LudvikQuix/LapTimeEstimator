@@ -43,11 +43,97 @@ hand-authored driver JSON has the same numbers as the spec.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..driver import Driver
+
+
+@dataclass(frozen=True)
+class PreviewParams:
+    """Adaptive brake-lookahead preview parameters (reactive controller).
+
+    Spec ``dev-planning/reactive-adaptive-preview``. Controls how the
+    reactive longitudinal brake channel derives its lookahead horizon:
+
+    - ``mode == "uniform"`` (default): the legacy
+      ``brake_lookahead_m = max(min_lookahead_m, v_preview · preview_time_s)``
+      path — **byte-identical to pre-spec behaviour**, the regression-safe
+      default.
+    - ``mode == "adaptive"``: per-corner physics-based horizon
+      ``safety_factor · (v² − v_min_ahead²) / (2 · a_brake_avail_ms2)``,
+      floored at ``min_lookahead_m`` and upper-bounded by the seed horizon.
+      Long only where a large speed drop is imminent; collapses to the floor
+      on straights / fast corners.
+
+    ``seed_lookahead_m is None`` => reuse the legacy uniform window
+    ``max(min_lookahead_m, v_preview · preview_time_s)`` as the seed horizon
+    for the first (seed) pass.
+    """
+
+    mode: str = "uniform"
+    a_brake_avail_ms2: float = 10.0
+    safety_factor: float = 1.15
+    min_lookahead_m: float = 30.0
+    seed_lookahead_m: float | None = None
+
+    @classmethod
+    def from_block(cls, block: dict) -> "PreviewParams":
+        """Parse the ``control_params.preview`` sub-block (validated)."""
+        raw = block.get("preview") if isinstance(block, dict) else None
+        if not isinstance(raw, dict):
+            return cls()
+        mode = str(raw.get("mode", cls.mode)).lower()
+        if mode not in ("uniform", "adaptive"):
+            raise ValueError(
+                "control_params.preview.mode must be 'uniform' or 'adaptive' "
+                f"(got {raw.get('mode')!r})"
+            )
+        try:
+            a_brake = float(raw.get("a_brake_avail_ms2", cls.a_brake_avail_ms2))
+            safety = float(raw.get("safety_factor", cls.safety_factor))
+            floor = float(raw.get("min_lookahead_m", cls.min_lookahead_m))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "control_params.preview a_brake_avail_ms2 / safety_factor / "
+                f"min_lookahead_m must be numeric ({exc})"
+            ) from exc
+        seed_raw = raw.get("seed_lookahead_m", cls.seed_lookahead_m)
+        try:
+            seed = float(seed_raw) if seed_raw is not None else None
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "control_params.preview.seed_lookahead_m must be a float or "
+                f"null (got {seed_raw!r})"
+            ) from exc
+        if a_brake <= 0.0:
+            raise ValueError(
+                "control_params.preview.a_brake_avail_ms2 must be > 0 "
+                f"(got {a_brake})"
+            )
+        if safety < 1.0:
+            raise ValueError(
+                "control_params.preview.safety_factor must be >= 1.0 "
+                f"(got {safety})"
+            )
+        if floor < 0.0:
+            raise ValueError(
+                "control_params.preview.min_lookahead_m must be >= 0 "
+                f"(got {floor})"
+            )
+        if seed is not None and seed < floor:
+            raise ValueError(
+                "control_params.preview.seed_lookahead_m must be >= "
+                f"min_lookahead_m (got seed={seed}, floor={floor})"
+            )
+        return cls(
+            mode=mode,
+            a_brake_avail_ms2=a_brake,
+            safety_factor=safety,
+            min_lookahead_m=floor,
+            seed_lookahead_m=seed,
+        )
 
 
 @dataclass(frozen=True)
@@ -129,6 +215,10 @@ class ControlParams:
     # remains smooth, no oscillation through s<300 m corner cluster). Set
     # per driver via `control_params.stanley.k_cross`.
     stanley_k_cross: float = 0.75
+    # Adaptive brake-lookahead preview (spec reactive-adaptive-preview). The
+    # default `PreviewParams()` is `mode="uniform"` => the legacy uniform
+    # brake-lookahead path, byte-identical to pre-spec behaviour.
+    preview: PreviewParams = field(default_factory=PreviewParams)
     measured: bool = False
 
     @classmethod
@@ -234,6 +324,7 @@ class ControlParams:
             steering_softener_full=full,
             stanley_blend_window_ticks=stanley_window,
             stanley_k_cross=stanley_k_cross,
+            preview=PreviewParams.from_block(block),
             measured=bool(block.get("measured", False)),
         )
 
@@ -254,5 +345,6 @@ class ControlParams:
             steering_softener_full=self.steering_softener_full,
             stanley_blend_window_ticks=self.stanley_blend_window_ticks,
             stanley_k_cross=self.stanley_k_cross,
+            preview=self.preview,
             measured=self.measured,
         )

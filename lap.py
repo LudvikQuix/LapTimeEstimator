@@ -399,6 +399,55 @@ def main():
                         help="Write a per-tick HMPC trace CSV to "
                              ".tmp/hmpc_diag.csv (spec §23.4.6.5). Off by "
                              "default.")
+    parser.add_argument("--hmpc-outer-line-follow", type=str, default=None,
+                        help="Outer line-follow mode (2026-05-26 task brief). "
+                             "Path to an ideal-line CSV (e.g. "
+                             "tracks_csv/ks_nurburgring/"
+                             "layout_sprint_a_ideal_line.csv) — the outer NLP "
+                             "is then pulled toward "
+                             "n_ideal(s)/psi_ideal(s) on the centerline "
+                             "Frenet frame, and the outer's lateral free-"
+                             "play collapses to following the supplied "
+                             "line. The simulation plant still runs on the "
+                             "centerline track CSV. Pass 'AUTO' to no-op when "
+                             "the simulation track itself is the ideal-line "
+                             "CSV (warning emitted). Driver-JSON equivalent: "
+                             "control_params.hmpc.line_follow.path. See "
+                             "docs/architecture-v3-hmpc-outer-line-following.md.")
+    parser.add_argument("--hmpc-outer-line-follow-w-n-ideal", type=float,
+                        default=None,
+                        help="Outer line-follow lateral weight (default 200.0). "
+                             "Increase to tighten lateral tracking; decrease "
+                             "to give the planner room to deviate from the "
+                             "ideal line for friction-circle reasons. Only "
+                             "consumed when --hmpc-outer-line-follow is set.")
+    parser.add_argument("--hmpc-outer-line-follow-w-psi-ideal", type=float,
+                        default=None,
+                        help="Outer line-follow heading weight (default 20.0). "
+                             "Pulls the planned ψ_e toward the ideal-line "
+                             "tangent so the inner's heading-tracking cost "
+                             "sees a consistent reference. Only consumed "
+                             "when --hmpc-outer-line-follow is set.")
+    parser.add_argument("--hmpc-reference-source", type=str, default="nlp",
+                        choices=["nlp", "ideal_csv"],
+                        help="HMPC inner-reference source (ideal-line bypass "
+                             "spec 2026-05-27). 'nlp' (default) is the outer-NLP "
+                             "plan — bit-identical to every prior build. "
+                             "'ideal_csv' DELETES the outer NLP from the loop "
+                             "and builds the inner reference directly from the "
+                             "ideal-line CSV (n/psi via the Frenet projection, "
+                             "v_ref from the CSV speed_ms column, "
+                             "a_long = v·dv/ds). Requires --hmpc-ideal-line-csv. "
+                             "DEDICATED flag — independent of "
+                             "--hmpc-outer-line-follow. See "
+                             "docs/architecture-v3-hmpc-ideal-line-bypass.md.")
+    parser.add_argument("--hmpc-ideal-line-csv", type=str, default=None,
+                        help="Ideal-line CSV path (speed + line source) for "
+                             "--hmpc-reference-source ideal_csv. The plant track "
+                             "(Arm A=centerline, Arm B=this CSV) is the "
+                             "positional track argument and is independent of "
+                             "this flag. Driver-JSON equivalent: "
+                             "control_params.hmpc.ideal_line_csv.")
     # Powertrain calibration overrides (BMW 1M straight-line shortfall, 2026-05-22).
     # See docs/architecture-bmw1m-powertrain-calibration.md.
     parser.add_argument("--boost-steady", type=float, default=None,
@@ -413,6 +462,20 @@ def main():
                         help="Override the body drag coefficient sampled from "
                              "WING_0.LUT_AOA_CD at AOA=0 (BMW 1M default 0.34). "
                              "Pass e.g. 0.32 to model a leaner aero pack.")
+    parser.add_argument("--grip-d-scale", type=float, default=None,
+                        help="Tyre-grip-envelope fix (Lever 1): scale the "
+                             "fitted lateral+longitudinal Pacejka peak D of "
+                             "BOTH axles by this factor before the plant, DP "
+                             "planner and MPC ellipse consume it. Default None "
+                             "= legacy fitted envelope (D_lat ~ 1.032), so "
+                             "existing laps are bit-identical. ~1.24 lifts "
+                             "D_lat to AC DY_REF ~ 1.28 to match Tomas's "
+                             "measured ~1.5 g friction circle. Applied UPSTREAM "
+                             "of combined-slip ellipse + FALLOFF + grip "
+                             "multiplier. For a durable opt-in carrier use "
+                             "drivers/tomas_highgrip.json (D baked in, scale "
+                             "left at 1.0). Slip path only. NOT baked into the "
+                             "AC ini loader; v2/point-mass grip is untouched.")
     parser.add_argument("--brake-torque-mult", type=float, default=None,
                         help="Multiply the brake_torque (brakes.ini MAX_TORQUE) "
                              "by this factor. v3 longitudinal-physics fix "
@@ -740,8 +803,14 @@ def _run_slip_model(args, parser):
             hmpc_emit_source=args.hmpc_emit_source,
             hmpc_inner_solver=args.hmpc_inner_solver,
             hmpc_debug_trace_path=hmpc_debug_path,
+            hmpc_line_follow_path=args.hmpc_outer_line_follow,
+            hmpc_line_follow_w_n_ideal=args.hmpc_outer_line_follow_w_n_ideal,
+            hmpc_line_follow_w_psi_ideal=args.hmpc_outer_line_follow_w_psi_ideal,
+            hmpc_reference_source=args.hmpc_reference_source,
+            hmpc_ideal_line_csv=args.hmpc_ideal_line_csv,
             tomas_csv_path=args.tomas_csv,
             line_source=args.line_source,
+            grip_d_scale=args.grip_d_scale,
         )
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)

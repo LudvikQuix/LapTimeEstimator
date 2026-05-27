@@ -208,8 +208,30 @@ def _fmt_time(seconds: float) -> str:
     return f"{m}:{s:06.3f}"
 
 
-def _load_pacejka_calibration(driver: "Driver") -> tuple[PacejkaCalibration, bool]:
+def _load_pacejka_calibration(
+    driver: "Driver",
+    *,
+    grip_d_scale: float | None = None,
+) -> tuple[PacejkaCalibration, bool]:
     """Build a :class:`PacejkaCalibration` from the driver's ``pacejka_calibration`` block.
+
+    Parameters
+    ----------
+    grip_d_scale : float, optional
+        Multiplicative scale applied to the lateral and longitudinal peak
+        ``D`` of *both* axles after the JSON is parsed (grip-envelope-fix
+        spec, Lever 1). ``None`` (default) leaves the fitted ``D`` untouched
+        — the legacy ``D ≈ 1.03`` envelope, so existing recorded laps are
+        bit-identical. A value of e.g. ``1.24`` lifts the fitted lateral
+        ``D ≈ 1.032`` to ``≈ 1.28`` (AC ``DY_REF``). Because every grip
+        consumer (the ODE plant in :mod:`vehicle`, the DP planner in
+        :mod:`longitudinal_planner`, and the MPC ellipse via
+        :func:`mpc_model.plant_constants_from_calibration`) reads ``D`` from
+        this single object, scaling here reaches all of them with no
+        per-consumer edit. Combined-slip ellipse, ``FALLOFF_LEVEL`` floor and
+        the production grip multiplier are applied *downstream* of this ``D``,
+        so the realised peak is tuned against the measured envelope, not the
+        raw ``D · Fz`` (spec §3 Lever 1).
 
     Returns
     -------
@@ -235,12 +257,16 @@ def _load_pacejka_calibration(driver: "Driver") -> tuple[PacejkaCalibration, boo
             "pacejka_calibration: both 'front' and 'rear' axles required."
         )
 
+    # Grip-envelope-fix Lever 1: opt-in scale on the fitted peak D. Default
+    # ``None`` => factor 1.0 (legacy envelope, regression-safe).
+    d_scale = 1.0 if grip_d_scale is None else float(grip_d_scale)
+
     def axle(d: dict) -> AxleCoeffs:
         lat = d.get("lateral") or {}
         lng = d.get("longitudinal") or {}
         # The fitter stores D as `D_per_Fz` (peak grip / Fz, i.e. mu peak).
-        lat_d = float(lat.get("D", lat.get("D_per_Fz", 1.5)))
-        lng_d = float(lng.get("D", lng.get("D_per_Fz", 1.4)))
+        lat_d = float(lat.get("D", lat.get("D_per_Fz", 1.5))) * d_scale
+        lng_d = float(lng.get("D", lng.get("D_per_Fz", 1.4))) * d_scale
         # AC load-sensitivity knobs (per axle): ``FZ0`` and ``LS_EXPY`` /
         # ``LS_EXPX``. Top-level axle dict may supply ``FZ0`` and
         # ``LS_EXPY`` / ``LS_EXPX`` directly (mirrors ``tyres.ini`` layout);

@@ -225,8 +225,23 @@ def simulate_slip(
     hmpc_emit_source: str = "qp",
     hmpc_inner_solver: str = "osqp",
     hmpc_debug_trace_path: str | None = None,
+    # Outer line-follow mode (task brief 2026-05-26).
+    hmpc_line_follow_path: str | None = None,
+    hmpc_line_follow_w_n_ideal: float | None = None,
+    hmpc_line_follow_w_psi_ideal: float | None = None,
+    # Ideal-line bypass mode (spec 2026-05-27). Dedicated plumbing; does NOT
+    # reuse the line-follow keys above. ``hmpc_reference_source="ideal_csv"``
+    # + ``hmpc_ideal_line_csv`` route the inner reference straight from the CSV.
+    hmpc_reference_source: str | None = None,
+    hmpc_ideal_line_csv: str | None = None,
     tomas_csv_path: str | None = None,
     line_source: str = "center",
+    # Grip-envelope-fix (spec dev-planning/tyre-grip-envelope-fix). Opt-in
+    # multiplicative scale on the fitted lateral+longitudinal peak D of both
+    # axles. ``None`` (default) keeps the legacy fitted envelope (D ~ 1.03),
+    # so existing recorded laps are unchanged. ~1.24 lifts D_lat to AC's
+    # DY_REF ~ 1.28 to reproduce Tomas's measured ~1.5 g friction circle.
+    grip_d_scale: float | None = None,
 ) -> SlipSimResult:
     """Single-lap (or N-lap) slip-based simulation (Phase 4).
 
@@ -242,7 +257,7 @@ def simulate_slip(
     """
     if not getattr(track, "is_csv_backed", False):
         raise ValueError("simulate_slip requires a CSV-backed track.")
-    calib, fallback = _load_pacejka_calibration(driver)
+    calib, fallback = _load_pacejka_calibration(driver, grip_d_scale=grip_d_scale)
     dyn = load_car_dynamics(car)
     n = int(n_laps if n_laps else 1)
     if two_lap and n < 2:
@@ -356,6 +371,11 @@ def simulate_slip(
             hmpc_emit_source=hmpc_emit_source,
             hmpc_inner_solver=hmpc_inner_solver,
             hmpc_debug_trace_path=hmpc_debug_trace_path,
+            hmpc_line_follow_path=hmpc_line_follow_path,
+            hmpc_line_follow_w_n_ideal=hmpc_line_follow_w_n_ideal,
+            hmpc_line_follow_w_psi_ideal=hmpc_line_follow_w_psi_ideal,
+            hmpc_reference_source=hmpc_reference_source,
+            hmpc_ideal_line_csv=hmpc_ideal_line_csv,
             line_xs=line_xs_override,
             line_ys=line_ys_override,
         )
@@ -401,6 +421,11 @@ def simulate_slip(
         hmpc_emit_source=hmpc_emit_source,
         hmpc_inner_solver=hmpc_inner_solver,
         hmpc_debug_trace_path=hmpc_debug_trace_path,
+        hmpc_line_follow_path=hmpc_line_follow_path,
+        hmpc_line_follow_w_n_ideal=hmpc_line_follow_w_n_ideal,
+        hmpc_line_follow_w_psi_ideal=hmpc_line_follow_w_psi_ideal,
+        hmpc_reference_source=hmpc_reference_source,
+        hmpc_ideal_line_csv=hmpc_ideal_line_csv,
         line_xs=line_xs_override,
         line_ys=line_ys_override,
     )
@@ -478,6 +503,11 @@ def _run_single(
     hmpc_emit_source: str = "qp",
     hmpc_inner_solver: str = "osqp",
     hmpc_debug_trace_path: str | None = None,
+    hmpc_line_follow_path: str | None = None,
+    hmpc_line_follow_w_n_ideal: float | None = None,
+    hmpc_line_follow_w_psi_ideal: float | None = None,
+    hmpc_reference_source: str | None = None,
+    hmpc_ideal_line_csv: str | None = None,
     line_xs: np.ndarray | None = None,
     line_ys: np.ndarray | None = None,
 ) -> SlipSimResult:
@@ -523,6 +553,11 @@ def _run_single(
         hmpc_emit_source=hmpc_emit_source,
         hmpc_inner_solver=hmpc_inner_solver,
         hmpc_debug_trace_path=hmpc_debug_trace_path,
+        hmpc_line_follow_path=hmpc_line_follow_path,
+        hmpc_line_follow_w_n_ideal=hmpc_line_follow_w_n_ideal,
+        hmpc_line_follow_w_psi_ideal=hmpc_line_follow_w_psi_ideal,
+        hmpc_reference_source=hmpc_reference_source,
+        hmpc_ideal_line_csv=hmpc_ideal_line_csv,
         line_xs=line_xs,
         line_ys=line_ys,
     )
@@ -671,6 +706,11 @@ def _run_monte_carlo(
     hmpc_emit_source: str = "qp",
     hmpc_inner_solver: str = "osqp",
     hmpc_debug_trace_path: str | None = None,
+    hmpc_line_follow_path: str | None = None,
+    hmpc_line_follow_w_n_ideal: float | None = None,
+    hmpc_line_follow_w_psi_ideal: float | None = None,
+    hmpc_reference_source: str | None = None,
+    hmpc_ideal_line_csv: str | None = None,
     line_xs: np.ndarray | None = None,
     line_ys: np.ndarray | None = None,
 ) -> SlipSimResult:
@@ -744,6 +784,11 @@ def _run_monte_carlo(
             hmpc_emit_source=hmpc_emit_source,
             hmpc_inner_solver=hmpc_inner_solver,
             hmpc_debug_trace_path=hmpc_debug_trace_path,
+            hmpc_line_follow_path=hmpc_line_follow_path,
+            hmpc_line_follow_w_n_ideal=hmpc_line_follow_w_n_ideal,
+            hmpc_line_follow_w_psi_ideal=hmpc_line_follow_w_psi_ideal,
+            hmpc_reference_source=hmpc_reference_source,
+            hmpc_ideal_line_csv=hmpc_ideal_line_csv,
             line_xs=line_xs,
             line_ys=line_ys,
         )
@@ -811,6 +856,11 @@ def _make_controller(
     hmpc_emit_source: str = "qp",
     hmpc_inner_solver: str = "osqp",
     hmpc_debug_trace_path: str | None = None,
+    hmpc_line_follow_path: str | None = None,
+    hmpc_line_follow_w_n_ideal: float | None = None,
+    hmpc_line_follow_w_psi_ideal: float | None = None,
+    hmpc_reference_source: str | None = None,
+    hmpc_ideal_line_csv: str | None = None,
     line_xs: np.ndarray | None = None,
     line_ys: np.ndarray | None = None,
 ):
@@ -909,6 +959,11 @@ def _make_controller(
             line_xs=line_xs,
             line_ys=line_ys,
             debug_trace_path=hmpc_debug_trace_path,
+            line_follow_path=hmpc_line_follow_path,
+            line_follow_w_n_ideal=hmpc_line_follow_w_n_ideal,
+            line_follow_w_psi_ideal=hmpc_line_follow_w_psi_ideal,
+            reference_source=hmpc_reference_source,
+            ideal_line_csv=hmpc_ideal_line_csv,
         )
     if controller == "reactive":
         return DriverController(
